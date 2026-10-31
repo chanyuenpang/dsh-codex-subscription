@@ -5,8 +5,9 @@ import { diagnosticLog } from './diagnostic-log.js'
 import { redactRequest } from './failure-capture.js'
 import { hoistLeadingSystem, runtimeVersions, understandsSystemMessages } from './pi-ai-compat.js'
 import { openaiCodexProvider as createOpenAICodexProvider } from '@earendil-works/pi-ai/providers/openai-codex'
-import { normalizeTransportEvent } from './transport-failure.js'
+import { normalizeTransportEvent, safeFetchFailure } from './transport-failure.js'
 import { createModelRetryBridge } from './model-retry-hint.js'
+import { createModelAttempt } from './model-attempt.js'
 import {
   CONTEXT_MODE_CUSTOM,
   CONTEXT_MODE_EXTENDED,
@@ -111,8 +112,10 @@ export function openaiCodexSubscriptionProvider({
   reasoning,
   ultra,
   runNetwork = (_area, operation) => operation(),
+  beginModelAttempt = createModelAttempt,
+  providerFactory = createOpenAICodexProvider,
 } = {}) {
-  const provider = createOpenAICodexProvider()
+  const provider = providerFactory()
   const retryBridge = createModelRetryBridge()
   const requestToken = Object.freeze({
     name: 'DSH-managed Codex OAuth request token',
@@ -198,10 +201,11 @@ export function openaiCodexSubscriptionProvider({
       }
     } catch { streamFailure.adapter = undefined }
   }
-  const noteStreamFailure = (stage, error, source) => {
+  const noteStreamFailure = (stage, error, source, networkFailure, attemptId) => {
     streamFailure.count += 1
-    diagnosticLog.error('model', `request failed while ${stage === 'prepare' ? 'preparing' : stage === 'request' ? 'sending' : stage === 'payload' ? 'building the payload' : 'streaming'}`, error)
+    diagnosticLog.error('model', `request failed while ${stage === 'prepare' ? 'preparing' : stage === 'request' ? 'sending' : stage === 'payload' ? 'building the payload' : 'streaming'}${networkFailure ? ': ' + networkFailure : ''}`, error)
     streamFailure.stage = stage
+    streamFailure.attemptId = attemptId
     // The request is deterministic input to pi-ai: keep a text-free copy so the failure can be replayed.
     try { streamFailure.request = source === undefined ? undefined : redactRequest(source) } catch { streamFailure.request = undefined }
     const frame = typeof error?.stack === 'string' ? /([\w.@-]+[\\/][\w.-]+\.[cm]?[jt]sx?):(\d+):(\d+)/u.exec(error.stack.split('\n').slice(1).join('\n')) : null
@@ -266,31 +270,85 @@ export function openaiCodexSubscriptionProvider({
     return { [Symbol.asyncIterator]: () => (replay ??= run()) }
   }
   const networkIterable = (factory, options, direct = false, source) => {
-    let iterator
-    let prepared
-    let stage = 'prepare'
+    const attempt = beginModelAttempt()
+    const cancellation = new AbortController()
+    const signal = options?.signal ? AbortSignal.any([options.signal, cancellation.signal]) : cancellation.signal
+    let iterator, producer, prepared, request, effectiveSource = source, stopped = false
+    let stage = 'prepare', networkFailure
     const retryHint = direct ? undefined : retryBridge.current()
-    const step = async (method, value) => { try {
-      // Review calls are one-shot: no WebSocket continuation or cloud compaction.
-      const request = await (prepared ??= (direct ? undefined : connection?.prepare(options)) ?? Promise.resolve({ options }))
-      if (stage === 'prepare') stage = 'request'
-      const result = await runNetwork('model', () => {
-        const next = direct ? request.options : compaction?.requestOptions(request.options) ?? request.options
-        iterator ??= factory({ ...next, async onResponse(info, requestModel) { retryHint?.onResponse(info); return next.onResponse?.(info, requestModel) }, async onPayload(payload, requestModel) { stage = 'payload'; return next.onPayload?.(payload, requestModel) } })[Symbol.asyncIterator]()
-        return iterator[method]?.(value) ?? (method === 'throw' ? Promise.reject(value) : Promise.resolve({ done: true, value }))
-      }, direct ? request.network : compaction?.networkOptions(request.network) ?? request.network)
-      if (!result.done) {
-        retryHint?.observe(result.value, request.options?.signal)
-        if (result.value?.type === 'error' && !request.options?.signal?.aborted) noteStreamFailure(stage, undefined, source)
-        else if (stage === 'payload') stage = 'stream'
+    const cancelled = () => signal.aborted && signal.reason?.name !== 'TimeoutError'
+    const settle = (status, error) => {
+      if (attempt.snapshot().status) return
+      if (status === 'failed') noteStreamFailure(stage, error, effectiveSource, networkFailure, attempt.snapshot().attemptId)
+      attempt.finish(status, stage)
+    }
+    const initialize = async () => {
+      // Explicitly forced SSE (cloud compaction/review) must not reserve a recovery probe.
+      const overrides = direct ? undefined : compaction?.networkOptions(undefined)
+      request = await (direct ? undefined : connection?.prepare({ ...options, signal }, { model: source?.model, allowWebSocket: overrides?.websocket !== false })) ?? { options }
+      const next = { ...(direct ? { ...request.options, transport: 'sse' } : compaction?.requestOptions(request.options) ?? request.options), signal }
+      attempt.configure({ ...request.diagnostic, requestedTransport: next.transport ?? 'auto', ...(direct ? { selectionReason: 'forced-sse' } : {}) })
+      effectiveSource = { ...source, options: next }
+      const scopedNetwork = direct ? request.network : overrides ?? request.network
+      stage = 'request'
+      return { next, network: {
+        ...scopedNetwork, modelAttempt: true,
+        onRoute(route) { attempt.route(route); scopedNetwork?.onRoute?.(route) },
+        onTransport(transport) { attempt.transport(transport); scopedNetwork?.onTransport?.(transport) },
+        onFetchFailure(error) { networkFailure = safeFetchFailure(error); attempt.fetchFailure(error); scopedNetwork?.onFetchFailure?.(error) },
+      } }
+    }
+    const step = async (method, value) => {
+      if (stopped) return { done: true, value: undefined }
+      try {
+        const { next, network } = await (prepared ??= initialize())
+        signal.throwIfAborted()
+        const result = await runNetwork('model', () => {
+          if (!iterator) {
+            producer = factory({ ...next,
+              async onResponse(info, requestModel) { attempt.response(); retryHint?.onResponse(info); return next.onResponse?.(info, requestModel) },
+              async onPayload(payload, requestModel) {
+                stage = 'payload'; signal.throwIfAborted()
+                const body = await next.onPayload?.(payload, requestModel)
+                signal.throwIfAborted(); stage = 'request'; return body
+              },
+            })
+            iterator = producer[Symbol.asyncIterator]()
+            // SDK result settles after its socket release, even if the consumer stops
+            // iterating. Do not free a recovery lease merely because return() was called.
+            producer.result().then(message => {
+              const status = cancelled() ? (stopped ? 'abandoned' : 'cancelled') : ['error', 'aborted'].includes(message?.stopReason) ? 'failed' : 'ok'
+              settle(status)
+              request.finish?.({ ...attempt.snapshot(), status })
+            }, error => { settle(cancelled() ? 'cancelled' : 'failed', error); request.finish?.(attempt.snapshot()) })
+          }
+          return iterator[method]?.(value) ?? (method === 'throw' ? Promise.reject(value) : Promise.resolve({ done: true, value }))
+        }, network)
+        if (!result.done) {
+          attempt.event(result.value)
+          retryHint?.observe(result.value, signal)
+          if (result.value?.type === 'error') settle(cancelled() ? 'cancelled' : 'failed')
+          else if (result.value?.type === 'done') settle('ok')
+          else if (stage === 'payload' || stage === 'request') stage = 'stream'
+        } else settle(cancelled() ? 'cancelled' : 'abandoned')
+        return result.done ? result : { ...result, value: normalizeTransportEvent(result.value, signal) }
+      } catch (error) {
+        settle(stopped ? 'abandoned' : cancelled() || error?.name === 'AbortError' ? 'cancelled' : 'failed', error)
+        if (!producer) request?.finish?.(attempt.snapshot())
+        throw error
       }
-      return result.done ? result : { ...result, value: normalizeTransportEvent(result.value, request.options?.signal) }
-    } catch (error) { noteStreamFailure(stage, error, source); throw error } }
+    }
     return {
       [Symbol.asyncIterator]() { return this },
       next: value => step('next', value),
-      return: value => iterator ? step('return', value) : Promise.resolve({ done: true, value }),
-      throw: error => iterator ? step('throw', error) : Promise.reject(error),
+      async return(value) {
+        const status = options?.signal?.aborted ? options.signal.reason?.name === 'TimeoutError' ? 'failed' : 'cancelled' : 'abandoned'
+        stopped = true; cancellation.abort(); settle(status)
+        if (prepared) await prepared.catch(() => {})
+        if (!producer) request?.finish?.(attempt.snapshot())
+        return iterator?.return?.(value) ?? { done: true, value }
+      },
+      throw: error => step('throw', error),
     }
   }
   const routed = (method, model, transcript, options) => {
@@ -299,7 +357,7 @@ export function openaiCodexSubscriptionProvider({
     const route = reviewRoute(model, context)
     const source = { method, model, context, options }
     const create = () => route === undefined
-      ? networkIterable(prepared => provider[method](model, context, prepared), withPreferences(model, options), false, source)
+      ? networkIterable(prepared => provider[method](model, context, prepared), withPreferences(model, options), isDshAutoReview(context), source)
       : networkIterable(prepared => provider[method](model, context, prepared), withReview(route, options), true, source)
     return isDshAutoReview(context) ? reviewIterable(create) : create()
   }
