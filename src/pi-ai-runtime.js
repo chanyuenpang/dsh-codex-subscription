@@ -8,6 +8,8 @@ import { openaiCodexProvider as createOpenAICodexProvider } from '@earendil-work
 import { normalizeTransportEvent, safeFetchFailure } from './transport-failure.js'
 import { createModelRetryBridge } from './model-retry-hint.js'
 import { createModelAttempt } from './model-attempt.js'
+import { effectiveContextWindow } from './context-budget.js'
+import { createModelStreamHealth } from './model-stream-health.js'
 import {
   CONTEXT_MODE_CUSTOM,
   CONTEXT_MODE_EXTENDED,
@@ -116,6 +118,7 @@ export function openaiCodexSubscriptionProvider({
   providerFactory = createOpenAICodexProvider,
 } = {}) {
   const provider = providerFactory()
+  const streamHealth = createModelStreamHealth({ log: (level, message) => diagnosticLog.log(level, 'model-stream', message) })
   const retryBridge = createModelRetryBridge()
   const requestToken = Object.freeze({
     name: 'DSH-managed Codex OAuth request token',
@@ -125,7 +128,7 @@ export function openaiCodexSubscriptionProvider({
       return { auth: { apiKey: token }, source: 'DSH-managed OAuth request' }
     },
   })
-  const modelMetadata = model => catalog?.metadata(model?.id)
+  const modelMetadata = model => catalog?.metadata?.(model?.id)
   const supportsVerbosity = model => modelMetadata(model)?.supportVerbosity ?? model?.id !== 'gpt-5.3-codex-spark'
   const withPreferences = (model, options = {}) => {
     const metadata = modelMetadata(model)
@@ -158,7 +161,7 @@ export function openaiCodexSubscriptionProvider({
           ...(textVerbosity === undefined ? {} : { text: { ...(payload.text ?? {}), verbosity: textVerbosity } }),
           ...(serviceTier === undefined ? {} : { service_tier: serviceTier }),
         }
-        const managed = compaction?.preparePayload(preferred, model?.contextWindow) ?? preferred
+        const managed = compaction?.preparePayload(preferred, model?.contextWindow, options.maxTokens) ?? preferred
         const next = await onPayload?.(managed, requestModel)
         const detailed = inputImageDetail === 'auto'
           ? next ?? managed
@@ -177,14 +180,14 @@ export function openaiCodexSubscriptionProvider({
   const getModels = () => (catalog?.getModels() ?? provider.getModels()).map(model => {
     const maximum = modelContextMaximum(model)
     const mode = resolveContextMode()
-    if (model.id === 'gpt-5.3-codex-spark' || ![CONTEXT_MODE_EXTENDED, CONTEXT_MODE_CUSTOM].includes(mode)) return model
-    if (mode === CONTEXT_MODE_EXTENDED) {
-      // Prefer the explicit catalog maximum; known offline models keep audited presets.
-      const contextWindow = maximum
-      return { ...model, contextWindow }
+    let window = model.contextWindow
+    if (model.id !== 'gpt-5.3-codex-spark') {
+      if (mode === CONTEXT_MODE_EXTENDED) window = maximum
+      else if (mode === CONTEXT_MODE_CUSTOM) window = clampModelContext(resolveCustomContextWindow(customContextModelKey(model.id)), maximum, window)
     }
-    const requested = clampModelContext(resolveCustomContextWindow(customContextModelKey(model.id)), maximum, model.contextWindow)
-    return { ...model, contextWindow: requested }
+    // Do not add an undefined capacity to provider-native descriptors: older
+    // runtimes distinguish an omitted field from an explicitly invalid one.
+    return window === undefined ? model : { ...model, contextWindow: effectiveContextWindow(window, modelMetadata(model)?.effectiveContextWindowPercent) }
   })
   const review = { requests: 0, routed: 0, sessionModel: 0, retries: 0 }
   // pi-ai turns an exception raised while it builds or sends a request into an
@@ -273,12 +276,13 @@ export function openaiCodexSubscriptionProvider({
     const attempt = beginModelAttempt()
     const cancellation = new AbortController()
     const signal = options?.signal ? AbortSignal.any([options.signal, cancellation.signal]) : cancellation.signal
-    let iterator, producer, prepared, request, effectiveSource = source, stopped = false
+    let iterator, producer, prepared, request, health, effectiveSource = source, stopped = false
     let stage = 'prepare', networkFailure
     const retryHint = direct ? undefined : retryBridge.current()
     const cancelled = () => signal.aborted && signal.reason?.name !== 'TimeoutError'
-    const settle = (status, error) => {
+    const settle = (status, error, healthError = error) => {
       if (attempt.snapshot().status) return
+      health?.finish(status === 'ok' ? 'completed' : status === 'abandoned' ? 'cancelled' : status, healthError)
       if (status === 'failed') noteStreamFailure(stage, error, effectiveSource, networkFailure, attempt.snapshot().attemptId)
       attempt.finish(status, stage)
     }
@@ -289,6 +293,7 @@ export function openaiCodexSubscriptionProvider({
       const next = { ...(direct ? { ...request.options, transport: 'sse' } : compaction?.requestOptions(request.options) ?? request.options), signal }
       attempt.configure({ ...request.diagnostic, requestedTransport: next.transport ?? 'auto', ...(direct ? { selectionReason: 'forced-sse' } : {}) })
       effectiveSource = { ...source, options: next }
+      health = streamHealth.begin({ sessionId: direct ? undefined : options?.sessionId, configured: request.options?.transport, selected: next.transport })
       const scopedNetwork = direct ? request.network : overrides ?? request.network
       stage = 'request'
       return { next, network: {
@@ -306,7 +311,8 @@ export function openaiCodexSubscriptionProvider({
         const result = await runNetwork('model', () => {
           if (!iterator) {
             producer = factory({ ...next,
-              async onResponse(info, requestModel) { attempt.response(); retryHint?.onResponse(info); return next.onResponse?.(info, requestModel) },
+              async onResponse(info, requestModel) { health.response(info); attempt.response(); retryHint?.onResponse(info); return next.onResponse?.(info, requestModel) },
+              onProviderStreamEvent(event) { health.providerEvent(); return next.onProviderStreamEvent?.(event) },
               async onPayload(payload, requestModel) {
                 stage = 'payload'; signal.throwIfAborted()
                 const body = await next.onPayload?.(payload, requestModel)
@@ -318,16 +324,17 @@ export function openaiCodexSubscriptionProvider({
             // iterating. Do not free a recovery lease merely because return() was called.
             producer.result().then(message => {
               const status = cancelled() ? (stopped ? 'abandoned' : 'cancelled') : ['error', 'aborted'].includes(message?.stopReason) ? 'failed' : 'ok'
-              settle(status)
+              settle(status, undefined, message)
               request.finish?.({ ...attempt.snapshot(), status })
             }, error => { settle(cancelled() ? 'cancelled' : 'failed', error); request.finish?.(attempt.snapshot()) })
           }
           return iterator[method]?.(value) ?? (method === 'throw' ? Promise.reject(value) : Promise.resolve({ done: true, value }))
         }, network)
         if (!result.done) {
+          health?.observe(result.value)
           attempt.event(result.value)
           retryHint?.observe(result.value, signal)
-          if (result.value?.type === 'error') settle(cancelled() ? 'cancelled' : 'failed')
+          if (result.value?.type === 'error') settle(cancelled() ? 'cancelled' : 'failed', undefined, result.value.error)
           else if (result.value?.type === 'done') settle('ok')
           else if (stage === 'payload' || stage === 'request') stage = 'stream'
         } else settle(cancelled() ? 'cancelled' : 'abandoned')
@@ -369,6 +376,7 @@ export function openaiCodexSubscriptionProvider({
     streamSimple: (model, context, options) => routed('streamSimple', model, context, options),
     reviewCounters: () => ({ ...review }),
     streamFailure: () => ({ ...streamFailure }),
+    streamHealth: streamHealth.snapshot,
     noteAdapterFailure,
     wrapRetryAdapter: adapter => retryBridge.wrapAdapter(adapter),
   })
