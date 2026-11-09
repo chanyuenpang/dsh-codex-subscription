@@ -63,12 +63,16 @@ export async function recoverySdkContract(providerFactory, api) {
   const context = { messages: [{ role: 'user', content: 'First synthetic turn', timestamp: 1 }] }
   const options = { apiKey, sessionId: 'synthetic-session', transport: 'sse', maxRetries: 0 }
   const run = async () => {
+    const before = network.history().events.length
     let result, error
     for await (const event of provider.streamSimple(model, context, { ...options, signal: AbortSignal.timeout(3000) })) {
       if (event.type === 'done') result = event.message
       if (event.type === 'error') error = event.error
     }
     if (result) context.messages.push(result)
+    assert.equal(network.history().events.length, before + 1, 'one terminal diagnostic per SDK attempt, including fallback')
+    assert.equal(network.snapshot().model.status, error ? 'failed' : 'ok')
+    assert.equal(network.snapshot().model.preference, 'websocket', 'configured preference survives cooldown overrides')
     return { result, error }
   }
   const user = text => context.messages.push({ role: 'user', content: text, timestamp: 2 })
@@ -106,8 +110,7 @@ export async function recoverySdkContract(providerFactory, api) {
     mode = 'stream-failure'; user('Interrupt after acceptance')
     assert.ok((await run()).error)
     assert.equal(fetches, 2, 'no SSE replay after first response event')
-    assert.equal(network.history().events.at(-1).status, 'failed')
-    assert.deepEqual(network.history().events.at(-1).transports, ['websocket'])
+    assert.equal(provider.streamHealth().at(-1).status, 'failed')
     time += 30000; mode = 'hold'
     const abort = new AbortController()
     const stream = provider.streamSimple(model, context, { ...options, signal: abort.signal })

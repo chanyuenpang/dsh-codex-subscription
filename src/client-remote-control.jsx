@@ -1,7 +1,7 @@
 import { Hint, SettingsLabel } from './client-hint.jsx'
 import { useEffect, useRef, useState } from 'react'
 import { create as createQr } from 'qrcode/lib/core/qrcode.js'
-import { Button, Switch } from './client-primitives.js'
+import { Button, Switch } from './client-primitives.jsx'
 import { CHANNEL } from './rpc-contract.js'
 import { uiLocale } from './client-shared.js'
 
@@ -77,6 +77,25 @@ export function RemoteControlCard({ rpc, preference, snapshot, t, active = true 
     const timer = setInterval(() => setNow(Date.now()), 5000)
     return () => clearInterval(timer)
   }, [pairing, active])
+  useEffect(() => {
+    if (!on || !active || !pairing) return undefined
+    let stopped = false, timer
+    const poll = async () => {
+      if (Date.now() >= pairing.expiresAt) return
+      try {
+        const result = await rpc.call(CHANNEL, 'remote/pair-status', { pairingCode: pairing.pairingCode })
+        if (stopped) return
+        if (result.ok && result.value.claimed === true) {
+          setPairing(current => current === pairing ? undefined : current)
+          void readClients()
+          return
+        }
+      } catch { /* a transient failure is not evidence that the code was used */ }
+      if (!stopped) timer = setTimeout(poll, 5000)
+    }
+    timer = setTimeout(poll, 5000)
+    return () => { stopped = true; clearTimeout(timer) }
+  }, [on, active, pairing, rpc])
   const pair = async () => {
     if (busy) return
     setBusy(true); setFailed(false)

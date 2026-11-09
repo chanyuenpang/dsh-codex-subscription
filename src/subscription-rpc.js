@@ -1,5 +1,6 @@
-import { REQUEST_BLOCKED } from './http-failure.js'
+import { REQUEST_BLOCKED, isAccessFailureMessage } from './http-failure.js'
 import { PREFERENCE_FIELDS } from './preference-fields.js'
+import { normalizeSubagentModel } from './subagent-defaults.js'
 import { capabilityPatch } from './capability-settings.js'
 import { ORIGINAL_IMAGE_CHUNK_BYTES, ORIGINAL_IMAGE_ID_PATTERN } from './image-original-contract.js'
 import { AUTO_QUOTA_RETRY_FIELD, CUSTOM_CONTEXT_MODEL_CAPS, CUSTOM_CONTEXT_MODEL_FIELDS, CUSTOM_CONTEXT_WINDOW_FIELD, DISABLED_MODELS_FIELD, normalizeCustomContextWindow, normalizeDisabledModels } from './settings-contract.js'
@@ -24,7 +25,7 @@ export async function settlesLive(preferences, patch, signal, { attempts = 8, de
   return live()
 }
 
-export function createSubscriptionRpcHandler({ authHandler, usageReader, accountUsageReader, planHistoryReader, usageProfileReader, resetCreditService, preferences, defaultModel, runtimeManagement, remoteControl, desktopVoice, nativeVoice, voicePreview, composerPredictions, diagnosticsReader, modelCatalog, originalImages, resolveInheritedOriginal, closeConnections, onAccountChanged, onCleanupFailure }) {
+export function createSubscriptionRpcHandler({ authHandler, usageReader, accountUsageReader, planHistoryReader, usageProfileReader, resetCreditService, preferences, defaultModel, runtimeManagement, remoteControl, desktopVoice, nativeVoice, voicePreview, composerPredictions, diagnosticsReader, modelCatalog, subagentCatalog, originalImages, resolveInheritedOriginal, closeConnections, onAccountChanged, onCleanupFailure }) {
   return async (endpoint, payload, signal) => {
     if (endpoint === 'predictions/generate') {
       try {
@@ -85,16 +86,6 @@ export function createSubscriptionRpcHandler({ authHandler, usageReader, account
           : 'Could not save the default model')
       }
     }
-    if (endpoint === 'voice/interrupt') {
-      try {
-        signal.throwIfAborted()
-        if (typeof desktopVoice?.interrupt !== 'function' || typeof payload?.sessionId !== 'string') return publicError('unavailable', 'Voice is unavailable')
-        return { ok: true, value: { interrupted: desktopVoice.interrupt(payload.sessionId) } }
-      } catch (error) {
-        if (signal.aborted) throw error
-        return publicError('operation-error', 'Could not interrupt voice')
-      }
-    }
     if (endpoint === 'voice/status') {
       try {
         signal.throwIfAborted()
@@ -104,6 +95,12 @@ export function createSubscriptionRpcHandler({ authHandler, usageReader, account
         if (signal.aborted) throw error
         return publicError('operation-error', 'Could not read the voice status')
       }
+    }
+    if (endpoint === 'voice/playback') {
+      signal.throwIfAborted()
+      if (typeof payload?.sessionId !== 'string' || !['playing', 'waiting'].includes(payload.state)) return publicError('invalid-input', 'Invalid playback event')
+      desktopVoice?.playback?.(payload.sessionId, payload.state)
+      return { ok: true, value: {} }
     }
     if (endpoint === 'voice/start' || endpoint === 'voice/stop') {
       try {
@@ -135,7 +132,7 @@ export function createSubscriptionRpcHandler({ authHandler, usageReader, account
         return publicError(['voice-auth', 'voice-catalog', 'voice-download'].includes(error?.code) ? error.code : 'operation-error', 'Could not load the voice sample')
       }
     }
-    if (['remote/status', 'remote/enable', 'remote/disable', 'remote/pair', 'remote/clients', 'remote/revoke'].includes(endpoint)) {
+    if (['remote/status', 'remote/enable', 'remote/disable', 'remote/pair', 'remote/pair-status', 'remote/clients', 'remote/revoke'].includes(endpoint)) {
       try {
         signal.throwIfAborted()
         if (!remoteControl) return publicError('unavailable', 'Remote Control is unavailable')
@@ -145,7 +142,8 @@ export function createSubscriptionRpcHandler({ authHandler, usageReader, account
             : action === 'disable' ? await remoteControl.disable()
               : action === 'clients' ? await remoteControl.clients(signal)
                 : action === 'revoke' ? await remoteControl.revoke(payload?.clientId, signal)
-                  : await remoteControl.pair(signal)
+                  : action === 'pair-status' ? await remoteControl.pairingStatus(payload?.pairingCode, signal)
+                    : await remoteControl.pair(signal)
         return { ok: true, value }
       } catch (error) {
         if (signal.aborted) throw error
@@ -207,12 +205,16 @@ export function createSubscriptionRpcHandler({ authHandler, usageReader, account
         if (typeof modelCatalog?.refresh !== 'function' || typeof preferences?.status !== 'function') {
           return publicError('internal', 'Could not refresh Codex model catalog')
         }
-        await modelCatalog.refresh({ signal })
+        const native = subagentCatalog && preferences.status()?.subagentBackend === 'codex'
+          ? subagentCatalog.refresh({ signal }).catch(() => {}) : undefined
+        await Promise.all([modelCatalog.refresh({ signal }), native])
+        signal.throwIfAborted()
         const value = preferences.status()
         return {
           ok: true,
           value: {
             availableModels: Array.isArray(value?.availableModels) ? value.availableModels : [],
+            subagentModels: Array.isArray(value?.subagentModels) ? value.subagentModels : [],
             contextModels: Array.isArray(value?.contextModels) ? value.contextModels : [],
             verbosityModels: Array.isArray(value?.verbosityModels) ? value.verbosityModels : [],
             fastModels: Array.isArray(value?.fastModels) ? value.fastModels : [],
@@ -223,6 +225,7 @@ export function createSubscriptionRpcHandler({ authHandler, usageReader, account
         }
       } catch (error) {
         if (signal.aborted) throw error
+        if (error?.name === 'TimeoutError') return publicError('internal', 'Codex model catalog refresh timed out')
         return publicError('internal', 'Could not refresh Codex model catalog')
       }
     }
@@ -250,6 +253,10 @@ export function createSubscriptionRpcHandler({ authHandler, usageReader, account
             if (!Object.hasOwn(payload ?? {}, field)) continue
             if (!rule.choices.includes(payload[field])) return publicError('internal', rule.error)
             patch[field] = payload[field]
+          }
+          if (Object.hasOwn(payload ?? {}, 'subagentDefaultModel')) {
+            if (normalizeSubagentModel(payload.subagentDefaultModel) !== payload.subagentDefaultModel) return publicError('internal', 'Invalid subtask model')
+            patch.subagentDefaultModel = payload.subagentDefaultModel
           }
           if (Object.hasOwn(payload ?? {}, CUSTOM_CONTEXT_WINDOW_FIELD)) {
             if (normalizeCustomContextWindow(payload[CUSTOM_CONTEXT_WINDOW_FIELD]) !== payload[CUSTOM_CONTEXT_WINDOW_FIELD]) {
@@ -293,7 +300,7 @@ export function createSubscriptionRpcHandler({ authHandler, usageReader, account
           'ChatGPT sign-in needs to be renewed',
           REQUEST_BLOCKED,
         ])
-        const message = error instanceof Error && known.has(error.message)
+        const message = error instanceof Error && (known.has(error.message) || isAccessFailureMessage(error.message))
           ? error.message
           : 'Could not read ChatGPT usage'
         return publicError('internal', message)
@@ -306,7 +313,7 @@ export function createSubscriptionRpcHandler({ authHandler, usageReader, account
       } catch (error) {
         if (signal.aborted) throw error
         const known = new Set(['ChatGPT subscription is not signed in', 'ChatGPT sign-in needs to be renewed', REQUEST_BLOCKED])
-        return publicError('internal', error instanceof Error && known.has(error.message) ? error.message : 'Could not read ChatGPT usage profile')
+        return publicError('internal', error instanceof Error && (known.has(error.message) || isAccessFailureMessage(error.message)) ? error.message : 'Could not read ChatGPT usage profile')
       }
     }
     if (endpoint === 'usage/accounts') {
@@ -325,7 +332,7 @@ export function createSubscriptionRpcHandler({ authHandler, usageReader, account
       } catch (error) {
         if (signal.aborted) throw error
         const known = new Set(['ChatGPT subscription is not signed in', 'ChatGPT sign-in needs to be renewed', REQUEST_BLOCKED])
-        return publicError('internal', error instanceof Error && known.has(error.message) ? error.message : 'Could not read ChatGPT usage history')
+        return publicError('internal', error instanceof Error && (known.has(error.message) || isAccessFailureMessage(error.message)) ? error.message : 'Could not read ChatGPT usage history')
       }
     }
     if (endpoint === 'reset-credit/inspect' || endpoint === 'reset-credit/prepare' || endpoint === 'reset-credit/consume') {
@@ -361,7 +368,7 @@ export function createSubscriptionRpcHandler({ authHandler, usageReader, account
           : endpoint === 'reset-credit/prepare'
             ? 'Could not prepare a quota reset'
             : 'Could not use the quota reset'
-        const message = error instanceof Error && known.has(error.message) ? error.message : fallback
+        const message = error instanceof Error && (known.has(error.message) || isAccessFailureMessage(error.message)) ? error.message : fallback
         return publicError('internal', message)
       }
     }
@@ -373,6 +380,7 @@ export function createSubscriptionRpcHandler({ authHandler, usageReader, account
       const tasks = [() => closeConnections?.(), () => usageReader.clearCache(), () => planHistoryReader?.clear(), () => usageProfileReader?.clear(),
         () => resetCreditService.clear(), () => modelCatalog?.clear(), () => onAccountChanged?.()]
       if (endpoint === 'logout') tasks.push(() => usageReader.clear(), () => accountUsageReader?.clear())
+      if (endpoint === 'login/status') tasks.push(() => accountUsageReader?.clear())
       if (endpoint === 'account/remove' && typeof payload?.id === 'string') tasks.push(() => usageReader.clearScope(payload.id))
       const outcomes = await Promise.allSettled(tasks.map(task => Promise.resolve().then(task)))
       const catalogOutcomes = endpoint === 'logout'
@@ -382,7 +390,10 @@ export function createSubscriptionRpcHandler({ authHandler, usageReader, account
         try { onCleanupFailure?.() } catch { /* Diagnostics must not change account results. */ }
       }
       if (endpoint !== 'logout') void Promise.resolve().then(() => modelCatalog?.refresh({ signal: undefined })).catch(() => {})
-    } else if (result.ok === true && (endpoint === 'status' || result.value?.authenticated === true)) {
+    } else if (result.ok === true && result.value?.authenticated === true
+      && modelCatalog?.status?.().source === 'unavailable' && modelCatalog.status().refresh === 'idle') {
+      // Quota polling also reads sign-in status. Do not refresh the model catalog
+      // every five seconds; startup, account changes and explicit refresh own it.
       void modelCatalog?.refresh({ signal: undefined }).catch(() => {})
     }
     return result

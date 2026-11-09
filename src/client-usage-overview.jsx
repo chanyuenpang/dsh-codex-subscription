@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { recoveryCall } from './client-recovery.js'
-import { fill, uiLocale } from './client-shared.js'
+import { accessFailureText, fill, uiLocale } from './client-shared.js'
 import { heatmapCells, firstWeekday, formatDuration } from './usage-heatmap.js'
 
 // Numbers and dates follow the language DSH shows, not the browser's.
@@ -44,13 +44,13 @@ export function UsageOverview({ rpc, t, signedIn, resetKey }) {
     [t('overviewThreads'), value.totalThreads === undefined ? undefined : value.totalThreads.toLocaleString(uiLocale())],
     [t('overviewEffort'), value.mostUsedReasoningEffort === undefined ? undefined : `${value.mostUsedReasoningEffort}${value.mostUsedReasoningEffortPercent === undefined ? '' : ` · ${value.mostUsedReasoningEffortPercent}%`}`],
     [t('overviewFast'), value.fastModePercent === undefined ? undefined : `${value.fastModePercent}%`],
-    [t('overviewLongestTurn'), value.longestRunningTurnSeconds === undefined ? undefined : formatDuration(value.longestRunningTurnSeconds, t)],
+    [t('overviewLongestTurn'), value.longestRunningTurnSeconds === undefined ? undefined : formatDuration(value.longestRunningTurnSeconds, t, uiLocale())],
   ].filter(([, text]) => text !== undefined)
   return <details className="codexSubscriptionHistory" onToggle={event => setOpen(event.currentTarget.open)}>
     <summary>{t('overviewTitle')}</summary>
     <div aria-live="polite">
       {state.status === 'loading' ? <p className="codexSubscriptionEmpty" role="status">{t('overviewLoading')}</p> : null}
-      {state.status === 'error' ? <p className="codexSubscriptionError" role="alert">{state.message}</p> : null}
+      {state.status === 'error' ? <p className="codexSubscriptionError" role="alert">{accessFailureText(state.message, t)}</p> : null}
       {state.status === 'ready' && stats.length === 0 ? <p className="codexSubscriptionEmpty" role="status">{t('overviewUnavailable')}</p> : null}
     </div>
     {stats.length === 0 ? null : <>

@@ -3,11 +3,13 @@ import { loadModelCatalogCache, saveModelCatalogCache } from './model-catalog-ca
 import { PACKAGE_VERSION, USER_AGENT } from './version.js'
 import { ultraCatalogPreset } from './ultra-effort.js'
 import { effectiveContextPercent } from './context-budget.js'
+import { authFailureMessage, isRestrictionFailureMessage } from './http-failure.js'
 
 export const CODEX_MODELS_URL = `https://chatgpt.com/backend-api/codex/models?client_version=${encodeURIComponent(PACKAGE_VERSION)}`
 
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
-const DEFAULT_REFRESH_TIMEOUT_MS = 10_000
+const DEFAULT_REFRESH_TIMEOUT_MS = 60_000
+const DEFAULT_LOCAL_TIMEOUT_MS = 10_000
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const nonEmpty = value => typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
 const positiveInteger = value => Number.isSafeInteger(value) && value > 0 ? value : undefined
@@ -215,11 +217,14 @@ function mergeModel(baseModels, remote) {
  * @returns {object} 可初始化、刷新、查询和清除的模型目录
  */
 export function createOfficialModelCatalog(options = {}) {
+  const nativeVersion = options.nativeVersion
+  const endpoint = nativeVersion === undefined ? CODEX_MODELS_URL
+    : `https://chatgpt.com/backend-api/codex/models?client_version=${encodeURIComponent(nativeVersion)}`
   const fetchCatalog = options.fetch ?? fetch
   const getNow = options.now ?? Date.now
   const schedule = options.setTimeout ?? setTimeout
   const cancelTimer = options.clearTimeout ?? clearTimeout
-  const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : DEFAULT_REFRESH_TIMEOUT_MS
+  const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : undefined
   const loadCache = options.loadCache ?? loadModelCatalogCache
   const saveCache = options.saveCache ?? saveModelCatalogCache
   const retryDelays = (options.retryDelaysMs ?? []).filter(delay => Number.isFinite(delay) && delay > 0)
@@ -248,7 +253,7 @@ export function createOfficialModelCatalog(options = {}) {
     signal?.addEventListener('abort', abort, { once: true })
     if (signal?.aborted) abort()
     const flight = { generation, controller }
-    const timer = schedule(() => controller.abort(new Error(`Codex model catalog ${label} timed out`)), timeoutMs)
+    const timer = schedule(() => controller.abort(Object.assign(new Error(`Codex model catalog ${label} timed out`), { name: 'TimeoutError' })), timeoutMs ?? (label === 'refresh' ? DEFAULT_REFRESH_TIMEOUT_MS : DEFAULT_LOCAL_TIMEOUT_MS))
     timer.unref?.()
     const task = Promise.resolve().then(() => { controller.signal.throwIfAborted(); return work(flight, controller.signal) })
     flight.promise = wait(task, controller.signal).finally(() => {
@@ -344,16 +349,19 @@ export function createOfficialModelCatalog(options = {}) {
         initialized = true
       }
       const id = credentials.accountId
-      const response = await fetchCatalog(CODEX_MODELS_URL, {
+      const response = await fetchCatalog(endpoint, {
         method: 'GET', redirect: 'error', signal: requestSignal,
-        headers: { authorization: `Bearer ${credentials.access}`, 'chatgpt-account-id': id, accept: 'application/json', originator: 'pi', 'user-agent': USER_AGENT, ...(etag === undefined ? {} : { 'if-none-match': etag }) },
+        headers: { authorization: `Bearer ${credentials.access}`, 'chatgpt-account-id': id, accept: 'application/json', originator: nativeVersion === undefined ? 'pi' : 'codex_cli_rs', 'user-agent': USER_AGENT, ...(etag === undefined ? {} : { 'if-none-match': etag }) },
       })
       if (!current(flight) || accountId !== id) return false
-      if (response.status !== 304 && !response.ok) throw new Error(`Codex model catalog failed (HTTP ${response.status})`)
+      if (response.status !== 304 && !response.ok) throw new Error(await authFailureMessage(response) ?? `Codex model catalog failed (HTTP ${response.status})`)
       const raw = response.status === 304 ? rawCatalog : await response.json()
       if (!current(flight) || accountId !== id) return false
       if (raw === undefined) throw new Error('Codex returned HTTP 304 without a cached model catalog')
-      const remote = parseOfficialModelCatalog(raw, getNow())
+      const catalog = (options.subagent === true || nativeVersion !== undefined) && Array.isArray(raw?.models)
+        ? { ...raw, models: raw.models.filter(model => model?.visibility === 'list' && model.supported_in_api !== false) }
+        : raw
+      const remote = parseOfficialModelCatalog(catalog, getNow())
       const next = remote.map(model => mergeModel(options.baseModels(), model)).filter(Boolean)
       if (!next.length) throw new Error('Codex returned an empty or incompatible model catalog')
       const changed = response.status !== 304 || JSON.stringify(next) !== JSON.stringify(models)
@@ -375,7 +383,7 @@ export function createOfficialModelCatalog(options = {}) {
     }, error => {
       if (flight.generation === generation) {
         refreshStatus = signal?.aborted ? 'idle' : 'failed'
-        if (!signal?.aborted) scheduleRetry(flight.generation)
+        if (!signal?.aborted && !isRestrictionFailureMessage(error?.message)) scheduleRetry(flight.generation)
       }
       throw error
     }).finally(() => { if (refreshing === flight) refreshing = undefined })

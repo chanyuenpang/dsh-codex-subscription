@@ -1,9 +1,9 @@
 import { recoveryCall } from './client-recovery.js'
 import { useEffect, useRef, useState } from 'react'
-import { Button } from './client-primitives.js'
-import { CHANNEL, unwrap, fill, uiLocale, percent, windowLabel, validDate, formatQuotaForecast, creditAmount, usePreferenceSnapshot } from './client-shared.js'
+import { Button } from './client-primitives.jsx'
+import { CHANNEL, unwrap, accessFailureText, usageFailureText, fill, uiLocale, percent, windowLabel, validDate, formatQuotaForecast, creditAmount, usePreferenceSnapshot } from './client-shared.js'
 import { creditExpiryStatus, creditExpiryDateText } from './credit-expiry.js'
-import { REQUEST_BLOCKED } from './http-failure.js'
+import { REQUEST_BLOCKED, isAccessFailureMessage } from './http-failure.js'
 import { useQuotaUsage } from './client-quota.jsx'
 import { QUICK_QUOTA_MODE_FORECAST } from './settings-contract.js'
 import { UsageHistory } from './client-usage-history.jsx'
@@ -43,13 +43,14 @@ export function ResetCreditList({ rpc, t, count, nextExpiresAt, initialCredits, 
   useEffect(() => {
     let live = true
     setState('loading')
-    setCredits([])
     void rpc.call(CHANNEL, 'reset-credit/inspect', {}).then(unwrap).then(value => {
       if (!live) return
       setCredits(Array.isArray(value.credits) ? value.credits : [])
       setState('ready')
-    }).catch(() => {
-      if (live) setState('error')
+    }).catch(error => {
+      if (!live) return
+      if (['No quota reset is available', 'No usable quota reset is available'].includes(error?.message)) setCredits([])
+      setState('error')
     })
     return () => { live = false }
   }, [rpc, count, refreshKey])
@@ -125,6 +126,7 @@ export function ResetCreditControl({ rpc, t, credit, hasExhaustedQuota, onConsum
 }
 
 export function resetCreditErrorText(error, t) {
+  if (isAccessFailureMessage(error?.message)) return accessFailureText(error.message, t)
   const key = new Map([
     ['ChatGPT subscription is not signed in', 'resetRenewLogin'],
     ['ChatGPT sign-in needs to be renewed', 'resetRenewLogin'],
@@ -170,7 +172,7 @@ export function UsageCard({ rpc, t, signedIn, resetKey, preference }) {
       {signedIn && busy && usage === undefined ? <p className="codexSubscriptionEmpty" role="status">{t('usageLoading')}</p> : null}
       {signedIn && !busy && error === undefined && usage !== undefined && !hasUsageDetails ? <p className="codexSubscriptionEmpty" role="status">{t('usageEmpty')}</p> : null}
     </div>
-    {error === undefined ? null : <p className="codexSubscriptionError" role="alert">{error}</p>}
+    {error === undefined ? null : <p className="codexSubscriptionError" role="alert">{usageFailureText(error, t)}</p>}
     {visibleUsage?.spendControlReached === true ? <p className="codexSubscriptionError" role="alert">{t('spendReached')}</p> : null}
     {limits.length === 0 ? null : <div className="codexSubscriptionLimits">{limits.flatMap(limit => limit.windows.map((window, index) => <div className="codexSubscriptionLimit" key={`${limit.id}-${window.windowSeconds}-${index}`}>
         <div className="codexSubscriptionLimitTop"><span className="codexSubscriptionLimitLabel">{limit.name ?? limit.id}</span><strong>{percent(window.remainingPercent)}%</strong></div>
@@ -193,7 +195,7 @@ export function UsageCard({ rpc, t, signedIn, resetKey, preference }) {
         {visibleUsage?.credits ? <CreditExpiry credits={visibleUsage.credits} t={t} /> : null}
         {visibleUsage?.credits && !visibleUsage.credits.unlimited ? <p className="codexSubscriptionCreditNote">{t('creditsAfterAllowance')}</p> : null}
         {visibleUsage?.credits?.approxLocalMessages ? <p className="codexSubscriptionCreditNote">{fill(t('creditsMessages'), { local: `${count(visibleUsage.credits.approxLocalMessages[0])}–${count(visibleUsage.credits.approxLocalMessages[1])}`, cloud: visibleUsage.credits.approxCloudMessages ? `${count(visibleUsage.credits.approxCloudMessages[0])}–${count(visibleUsage.credits.approxCloudMessages[1])}` : t('unavailable') })}</p> : null}
-        {visibleUsage?.resetCredits?.availableCount > 0 ? <section className="codexSubscriptionResetPanel" aria-label={t('resetCredits')}><div className="codexSubscriptionResetHead"><strong>{t('resetCredits')}</strong><span>{t('resetCreditsHint')}</span></div><div className="codexSubscriptionResetBox"><div className="codexSubscriptionResetTabs"><span>{t('resetAvailableTab')}<b>{visibleUsage.resetCredits.availableCount}</b></span></div><ResetCreditList rpc={rpc} t={t} count={visibleUsage.resetCredits.availableCount} nextExpiresAt={visibleUsage.resetCredits.nextExpiresAt} initialCredits={visibleUsage.resetCredits.credits} refreshKey={`${resetKey}:${usageRefreshGeneration}`} hasExhaustedQuota={exhausted} onConsumed={() => load(true)} /></div></section> : null}
+        {visibleUsage?.resetCredits?.availableCount > 0 ? <section className="codexSubscriptionResetPanel" aria-label={t('resetCredits')}><div className="codexSubscriptionResetHead"><strong>{t('resetCredits')}</strong><span>{t('resetCreditsHint')}</span></div><div className="codexSubscriptionResetBox"><div className="codexSubscriptionResetTabs"><span>{t('resetAvailableTab')}<b>{visibleUsage.resetCredits.availableCount}</b></span></div><ResetCreditList rpc={rpc} t={t} count={visibleUsage.resetCredits.availableCount} nextExpiresAt={visibleUsage.resetCredits.nextExpiresAt} initialCredits={visibleUsage.resetCredits.credits} refreshKey={`${resetKey}:${historyRefreshKey}`} hasExhaustedQuota={exhausted} onConsumed={() => load(true)} /></div></section> : null}
         {visibleUsage?.individualLimit ? <div className="codexSubscriptionSpendLimit">
           <div className="codexSubscriptionSpendTop"><span className="codexSubscriptionCreditLabel">{t('monthlyCreditLimit')}</span><strong>{fill(t('remaining'), { value: percent(visibleUsage.individualLimit.remainingPercent) })}</strong></div>
           <progress max="100" value={visibleUsage.individualLimit.remainingPercent} aria-label={`${t('monthlyCreditLimit')} ${fill(t('remaining'), { value: percent(visibleUsage.individualLimit.remainingPercent) })}`} />

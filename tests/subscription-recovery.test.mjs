@@ -136,3 +136,36 @@ test('account cleanup rejects pending preparation and defers stats reset until o
   assert.deepEqual(f.resets, [key]); assert.equal(f.policy.snapshot().requests, 1)
   assert.equal(f.policy.recoverySnapshot().sessions.length, 0)
 })
+
+test('jitter remains bounded and repeated failures never exceed the hard cooldown cap', async () => {
+  const f = fixture({ random: () => 0.75 })
+  const key = await f.fail()
+  let expected = 33000
+  assert.equal(f.policy.recoverySnapshot().sessions[0].cooldownMs, expected)
+  for (let i = 0; i < 7; i++) {
+    f.advance(expected)
+    const probe = await f.prepare()
+    assert.equal(probe.diagnostic.selectionReason, 'ws-probe')
+    f.states.set(key, { requests: 1, websocketFailures: 1, websocketFallbackActive: true })
+    probe.finish({ status: 'failed', transports: ['websocket'] })
+    expected = Math.min(300000, expected * 2)
+    assert.equal(f.policy.recoverySnapshot().sessions[0].cooldownMs, expected)
+  }
+  assert.equal(f.policy.snapshot().websocketFailures, 8)
+  f.policy.dispose()
+})
+
+test('idle policy eviction is lazy, preserves totals and never evicts a live producer', async () => {
+  const f = fixture({ idleMs: 100 })
+  const held = await f.prepare()
+  f.states.set(held.options.sessionId, { requests: 2 })
+  f.advance(101)
+  const next = await f.prepare({ ...f.options, sessionId: 'another' })
+  assert.equal(f.closed.length, 0)
+  held.finish({ status: 'ok', transports: ['websocket'] })
+  f.advance(101)
+  const third = await f.prepare({ ...f.options, sessionId: 'third' })
+  assert.deepEqual(f.closed, [held.options.sessionId])
+  assert.equal(f.policy.snapshot().requests, 2)
+  next.finish({ status: 'ok' }); third.finish({ status: 'ok' }); f.policy.dispose()
+})

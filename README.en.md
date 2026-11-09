@@ -4,7 +4,7 @@
 
 # DSH Codex Subscription
 
-[简体中文](https://github.com/WSL043/dsh-codex-subscription/blob/main/README.md) · **English**
+**English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md) · [Português](README.pt.md)
 
 **Use your ChatGPT / Codex subscription directly in DeepSeek Harness**
 
@@ -22,6 +22,8 @@ Sign in with ChatGPT Plus / Pro to use GPT-6 and other Codex models, quota, web 
 
 <p align="center"><img src="docs/assets/hero-en.webp" width="1100" alt="Your subscription, now in DSH: the whale-girl mascot and the Codex subscription account quota interface"></p>
 
+<a id="highlights"></a>
+
 ## Highlights
 
 | What you want to do | What the plugin provides |
@@ -30,14 +32,14 @@ Sign in with ChatGPT Plus / Pro to use GPT-6 and other Codex models, quota, web 
 | **Manage accounts and quota** | Switch accounts, view short-window and weekly quota, Credits and resets; see usage history and optional quota alerts in the composer. |
 | **Create and edit images** | Generate images, mark regions for editing, or draw manually and with the Agent on an editable sketch board. [Examples →](#images-and-sketching) |
 | **Continue from your phone** | Pair the ChatGPT mobile app to control this computer's DSH. DeepSeek and other DSH models work too. [Beta, off by default →](#phone-remote-control-beta) |
-| **Use connected apps** | Let DSH models use apps connected in ChatGPT, including GitHub, Gmail, Drive and Calendar; changes ask for approval by default. |
+| **Use connected apps** | Let DSH models use apps connected in ChatGPT, including GitHub, Gmail, Drive and Calendar; write approval follows the current DSH session permissions. |
 
 Models and quota depend on what your account returns. [Complete feature list →](#all-features)
 
 <details>
 <summary>Use subscription features with DeepSeek and other models</summary>
 
-Let DeepSeek or any other DSH model use the apps you connected in ChatGPT: GitHub, Gmail, Google Drive, Calendar and more. Models search first, then call, and by default every change asks for your approval (you can switch that off in settings). Off by default; turn it on under Web & tools.
+Let DeepSeek or any other DSH model use the apps you connected in ChatGPT: GitHub, Gmail, Google Drive, Calendar and more. Models search first, then call, and write approval follows the mode you select and the current DSH session permissions. Off by default; turn it on under Web & tools.
 
 Web search and webpage reading sources, ChatGPT connectors and official Codex independent subtasks are on **Settings → Codex subscription → Web & tools**, with one master switch at the top: when off, conversations on DeepSeek and other non-Codex models no longer use subscription web search (DSH search is used instead), image generation or ChatGPT connectors; Codex subscription models are not affected. On by default.
 
@@ -45,9 +47,13 @@ Web search and webpage reading sources, ChatGPT connectors and official Codex in
 
 </details>
 
+<a id="prepare-dsh"></a>
+
 ## Prepare DSH
 
-Verified against DSH `0.2.1-rc.5`, with `0.2.1-rc.3` and `0.2.1-rc.2` still supported; the minimum supported version is `0.1.7-rc.2`. Please upgrade older DSH releases first.
+Verified against DSH `0.2.2-rc.1`, with `0.2.1-rc.3` and `0.2.1-rc.2` still supported; the minimum supported version is `0.1.7-rc.2`. Please upgrade older DSH releases first.
+
+DSH `0.2.2-rc.1` CLI/Web requires Node.js **24.9 or newer**; the official desktop app uses its bundled runtime.
 
 Also supports the preview host `0.2.2-alpha.2`. See the [compatibility notes](docs/dsh-022-alpha2-compatibility.md) for scope and validation limits.
 
@@ -62,7 +68,11 @@ This plugin supports the latest DeepSeek Harness release recorded in its package
 
 </details>
 
+<a id="install"></a>
+
 ## Install
+
+<a id="install-from-the-plugins-page-recommended"></a>
 
 ### Install from the Plugins page (recommended)
 
@@ -70,7 +80,7 @@ This plugin supports the latest DeepSeek Harness release recorded in its package
 2. Paste this package name, with its version, into the **Package name or address** field:
 
    ```text
-   dsh-codex-subscription@3.2.2
+   dsh-codex-subscription@3.2.7
    ```
 
 3. Click **Install** and wait for completion. Follow the page instructions; save your work before restarting if requested.
@@ -87,7 +97,7 @@ Why the version is included: DSH's plugin page only installs versions that are a
 <summary>Terminal installation (with an existing dsh command)</summary>
 
 ```sh
-dsh plugin --profile web add dsh-codex-subscription@3.2.2
+dsh plugin --profile web add dsh-codex-subscription@3.2.7
 ```
 
 Follow the restart instructions, then sign in under **Settings → Codex**. Both the Plugins page and the terminal use DSH's installation management.
@@ -100,42 +110,35 @@ Follow the restart instructions, then sign in under **Settings → Codex**. Both
 After signing in and selecting a Codex model in Web, install the same plugin in the Headless profile:
 
 ```sh
-dsh plugin --profile headless add dsh-codex-subscription@3.2.2
+dsh plugin --profile headless add dsh-codex-subscription@3.2.7
 dsh --profile headless "Reply with only the word: ok"
 ```
 
 </details>
 
+<a id="interface-demo"></a>
+
 ## Interface demo
 
-Open **Settings → Codex** to manage accounts and preferences. Screenshots and animation are collapsed below; choose the view you need.
+Connect your ChatGPT account, choose a Codex model in DSH, and check your subscription quota from the same settings page.
 
 <details>
-<summary><b>Interface demo (animation, click to expand)</b>: models, prompts, images, annotation, sketch board, quota and resets</summary>
-<br>
-<p align="center"><img src="docs/assets/readme-demo-en.webp" width="1100" alt="Demo: sign in with ChatGPT, pick a subscription model, ask, generate an image, view and annotate it, continue on the sketch board, and check quota and resets"></p>
-</details>
+<summary>Sign in and check subscription quota</summary>
 
-<details>
-<summary>Model settings: defaults, input predictions and answer style</summary>
+Open **Settings → Codex → Start** and select **Browser sign-in**. Once connected, this page shows your saved accounts and the quota reported by ChatGPT. Expand **Usage overview** or **Where the allowance went** for more detail.
 
-<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/ui-models-en-dark.png"><img src="docs/assets/ui-models-en-light.png" width="640" alt="Model settings with Restore DSH default and detailed help on hover"></picture></p>
+<p align="center"><img src="docs/assets/interface-account-en.png" width="584" alt="Sign in and check subscription quota"></p>
 
-</details>
-
-<details>
-<summary>Composer: models, speed, permissions and quota</summary>
-
-<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/ui-composer-en-dark.png"><img src="docs/assets/ui-composer-en-light.png" width="760" alt="Composer: workspace permission, remaining quota and model selection"></picture></p>
+_Account and quota values are examples._
 
 </details>
 
 <details>
-<summary>Quota and usage: balances, history and weekly breakdown</summary>
+<summary>Choose a Codex model and send a message</summary>
 
-<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/ui-quota-en-dark.png"><img src="docs/assets/ui-quota-en-light.png" width="560" alt="Quota card: weekly quota and reset time, with usage overview and where the allowance went below"></picture></p>
+Open **Settings → Codex → Models** to set a default model and reasoning effort. You can also choose a model for one conversation from the selector in the composer. Enter a prompt and send it to use your subscription in DSH.
 
-<p align="center"><img src="docs/assets/usage-overview-en.png" width="460" alt="Usage overview and where the allowance went in the quota card: lifetime tokens, streaks, a half-year daily heatmap and the weekly allowance split by model, surface and source"></p>
+<p align="center"><img src="docs/assets/interface-models-en.png" width="584" alt="Choose a Codex model and send a message"></p>
 
 </details>
 
@@ -158,6 +161,8 @@ Subscription failures remain visible: no silent fallback to another paid route.
 
 </details>
 
+<a id="images-and-sketching"></a>
+
 ## Images and sketching
 
 Generate images with your subscription, view and download the originals, or mark a region and add notes to continue editing. Image generation and editing are controlled under **Settings → Codex → Create**.
@@ -177,6 +182,8 @@ Generate images with your subscription, view and download the originals, or mark
 Settings shown directly as cropped screenshots from the actual DSH interface, following the light or dark theme.
 
 </details>
+
+<a id="sketch-board-beta"></a>
 
 ### Sketch board (Beta)
 
@@ -226,6 +233,8 @@ The Agent first drew an editable sketch, then used that sketch as the reference 
 
 [Image editing and draft storage →](docs/GUIDE.en.md#image-generation-and-editing)
 
+<a id="phone-remote-control-beta"></a>
+
 ## Phone remote control (Beta)
 
 Pair the Codex section of the ChatGPT mobile app with the DSH on your computer. Start or continue conversations, use tools and handle approvals from your phone, with DeepSeek or any other DSH model.
@@ -253,6 +262,8 @@ This is a third-party compatibility layer using OpenAI's remote connection servi
 <p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/ui-remote-en-dark.png"><img src="docs/assets/ui-remote-en-light.png" width="560" alt="Phone remote control in settings: the switch, connection status, pairing QR code and manual code"></picture></p>
 
 </details>
+
+<a id="all-features"></a>
 
 ## All features
 
@@ -324,6 +335,8 @@ Model access and quota depend on your account.
 
 </details>
 
+<a id="codex-subtask-runtime"></a>
+
 <details>
 <summary><b>Advanced capabilities and maintenance</b> (9)</summary>
 <br>
@@ -331,16 +344,18 @@ Model access and quota depend on your account.
 | Feature | What you can do | Availability / setup |
 | --- | --- | --- |
 | **Phone remote control** | Drive the DSH on your computer from the Codex section of the ChatGPT mobile app: start, continue and archive conversations, switch model and permissions, answer approvals and questions; DeepSeek and any other DSH model work | Beta; off by default; Settings → Codex → Phone & more → Phone remote control, pair by QR or manual code |
-| **Codex independent subtasks** | Reuse subscription sign-in and workspace permissions; select allowed models and reasoning levels | Beta, optional, most people do not need it: by default DSH runs its own subagents (they can use subscription models too); install the optional component (about 377 MB on Windows) and turn on model selection under Plugins → Subagents only if you want subtasks run by the official Codex agent. It uses its own data directory and your subscription sign-in, never the Codex login on this computer |
+| **Codex independent subtasks** | Reuse subscription sign-in and workspace permissions; select allowed models and reasoning levels | Beta, optional, most people do not need it: by default DSH runs its own subagents (they can use subscription models too); install the optional component (including a dedicated Codex CLI) and turn on model selection under Plugins → Subagents only if you want subtasks run by the official Codex agent. It uses its own data directory and your subscription sign-in, never the Codex login on this computer |
 | **Subtask component management** | Install, disable, or uninstall the official Codex subtask component from settings | Managed by supported DSH hosts; no extra login |
 | **Cloud context compaction** | Continue long conversations using Codex compaction while retaining DSH history and native compaction | Beta / experimental; off by default, enabled requests use SSE |
 | **WebSocket transport** | Experimentally reuse connections and context transfers, with SSE fallback on connection failure | Beta / experimental; SSE by default, no speed guarantee |
 | **Codex reviewer for Auto review** | DSH Auto review judges tool calls with Codex's own review model; DSH keeps its review policy and allow/deny flow | Beta; off by default, applies when your account catalog offers the model |
-| **ChatGPT connectors** | Let DeepSeek or any DSH model use the apps you connected in ChatGPT: GitHub, Gmail, Google Drive, Calendar and more; models search first, then call, and by default every change asks for your approval, switchable | Off by default, Settings → Codex → Web & tools → ChatGPT connectors; connect the apps in ChatGPT first |
+| **ChatGPT connectors** | Let DeepSeek or any DSH model use the apps you connected in ChatGPT: GitHub, Gmail, Google Drive, Calendar and more; models search first, then call, and write approval follows the chosen mode and current DSH session permissions | Off by default, Settings → Codex → Web & tools → ChatGPT connectors; connect the apps in ChatGPT first |
 | **Support diagnostics** | Inspect prerequisites and recent operation results, and copy a short report (about 1 KB; the full one can be copied separately) without credentials or conversation text | Settings → Codex → Phone & more; unverified does not mean broken |
 | **Forecast cache cleanup** | Inspect and clear local quota forecast history | Keeps sign-in, drafts, originals, and shared dependencies |
 
 </details>
+
+<a id="reuse-cache-when-changing-effort"></a>
 
 ### Reuse cache when changing effort
 
@@ -357,6 +372,8 @@ The request-level `reasoning.effort` stays at the current context window's initi
 
 This uses configuration updates documented in OpenAI's [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning); see [prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching) for cache requirements. Support follows the current account catalog and actual responses. Backend parameter rejections are surfaced, never retried with an old effort or an API key.
 
+<a id="update-and-uninstall"></a>
+
 ## Update and uninstall
 
 Find this plugin on the DSH **Plugins** page and use its update or uninstall action. Follow any restart instructions. Uninstalling this plugin does not remove other plugins.
@@ -365,7 +382,7 @@ Find this plugin on the DSH **Plugins** page and use its update or uninstall act
 <summary>Terminal commands</summary>
 
 ```sh
-dsh plugin --profile web update dsh-codex-subscription@3.2.2
+dsh plugin --profile web update dsh-codex-subscription@3.2.7
 ```
 
 Run only when you want to uninstall:
@@ -375,6 +392,8 @@ dsh plugin --profile web remove dsh-codex-subscription
 ```
 
 </details>
+
+<a id="troubleshooting"></a>
 
 ## Troubleshooting
 
@@ -411,12 +430,14 @@ Diagnostics exclude credentials, account identifiers, raw responses, and full lo
 <details>
 <summary>Do I need the Codex command line?</summary>
 
-Not for ordinary subscription chat. Only if you want **Codex independent subtasks**: use "Install component" under Settings → Codex subscription → Web & tools; disabling and uninstalling are in the same place. Other experimental options are opt-in. [Optional components, storage cleanup and the full guide →](docs/GUIDE.en.md)
+For **Codex independent subtasks**, install **Codex Subagent** from DSH Plugins, then choose **Prepare CLI** in the subscription settings. [Setup, removal and the full guide →](docs/GUIDE.en.md#codex-subtask-runtime)
 
 </details>
 
 <a id="positioning-and-boundaries"></a>
 <a id="scope-and-support"></a>
+
+<a id="project-and-support"></a>
 
 ## Project and support
 
@@ -443,4 +464,6 @@ If this project is useful, the [Star button](https://github.com/WSL043/dsh-codex
   </picture>
 </a>
 
-[简体中文](README.md) · [MIT](LICENSE)
+**English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md) · [Português](README.pt.md) · [MIT](LICENSE)
+
+[![powered by dsh](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)

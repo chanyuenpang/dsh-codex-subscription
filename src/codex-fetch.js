@@ -54,12 +54,12 @@ export function createCodexFetchProvider(options) {
           activeSignal.throwIfAborted()
           diagnosticLog.info('fetch', `Codex webpage HTTP ${response.status}`, `attempt=${attempt}`)
           if (!response.ok) {
-            if (RETRYABLE.has(response.status) && attempt === 1) {
+            const authFailure = await authFailureMessage(response)
+            if (authFailure === undefined && RETRYABLE.has(response.status) && attempt === 1) {
               await response.body?.cancel()
               await wait(options.retryDelayMs ?? 250, undefined, { signal: activeSignal })
               continue
             }
-            const authFailure = await authFailureMessage(response)
             throw new WebError(authFailure ?? `Codex webpage request failed (HTTP ${response.status})`, authFailure === SIGN_IN_RENEW ? 'WEB_PROVIDER_CREDENTIAL_MISSING' : 'WEB_PROVIDER_ERROR')
           }
           const value = await response.json()
@@ -140,7 +140,8 @@ export function configuredFetchProviderId(web, entries = [], ambient = process.e
   const environment = 'fetchProviderEnv' in web ? web.fetchProviderEnv : ambient
   if (typeof web.config?.fetchProvider?.get === 'function') return web.config.fetchProvider.get() ?? environment
   const entry = [...entries].find(item => item.options?.id === 'web')
-  const value = entry?.fiber?.config?.fetchProvider
+  const fiber = entry?.fiber
+  const value = (fiber?.effectiveConfig ?? fiber?.config)?.fetchProvider
   if (typeof value?.get === 'function') return value.get() ?? environment
   return value ?? entry?.options?.config?.fetchProvider ?? environment
 }

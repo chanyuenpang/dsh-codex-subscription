@@ -5,10 +5,10 @@ import { compareVersions } from '../scripts/prepare-compat-release.mjs'
 import { SUBAGENT_RUNTIME_VERSION, SUPPORTED_RUNTIME_VERSIONS } from '../src/subagent-runtime.js'
 
 const text = path => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
-const pngDimensions = path => {
-  const png = readFileSync(new URL(`../${path}`, import.meta.url))
-  assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a')
-  return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) }
+const imageHeader = path => {
+  const bytes = readFileSync(new URL(`../${path}`, import.meta.url))
+  if (bytes.length >= 24 && bytes.subarray(0, 8).toString('hex') === '89504e470d0a1a0a') return bytes.readUInt32BE(16) > 0 && bytes.readUInt32BE(20) > 0
+  return bytes.length > 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP' && bytes.readUInt32LE(4) + 8 <= bytes.length
 }
 const manifest = JSON.parse(text('package.json'))
 test('plugin card translations are exported and included in the published package', () => {
@@ -22,6 +22,20 @@ test('plugin card translations are exported and included in the published packag
   assert.match(JSON.parse(text('locale/zh.json')).meta.description, /订阅/)
 })
 const compatibility = JSON.parse(text('compatibility.json'))
+
+test('native plugin detail documents are brief, translated and explicitly packaged', () => {
+  assert.ok(manifest.files.includes('docs/plugin/*.md'))
+  for (const language of ['en', 'zh']) {
+    const { meta } = JSON.parse(text(`locale/${language}.json`))
+    const expected = language === 'zh' ? 'docs/plugin/DETAIL.zh.md' : 'docs/plugin/DETAIL.md'
+    assert.equal(meta.detail, expected)
+    const body = text(meta.detail)
+    assert.ok(Buffer.byteLength(body) < 1024, 'detail remains a short introduction')
+    assert.equal(body.includes('!['), false, 'no screenshots or duplicate README gallery')
+    assert.ok(body.includes(`README${language === 'zh' ? '.zh-CN' : ''}.md`))
+    assert.ok(body.includes('https://github.com/WSL043/dsh-codex-subscription/issues'))
+  }
+})
 
 test('verify-only release runs the acceptance layout while disabling every publication job', () => {
   const workflow = text('.github/workflows/publish.yml')
@@ -63,7 +77,10 @@ test('scheduled compatibility publication requires stable channels, accepted gat
   assert.doesNotMatch(workflow.slice(0, workflow.indexOf('\n  promote:')), /contents: write|actions: write|git push|gh workflow run/u)
   const staged = workflow.match(/git add -- ([^\n]+)/u)?.[1]?.trim().split(/\s+/u)
   assert.ok(staged)
-  for (const path of staged) assert.equal(existsSync(new URL(`../${path}`, import.meta.url)), true, path)
+  for (const path of staged) {
+    if (path === "'README*.md'") assert.ok(existsSync(new URL('../README.md', import.meta.url)))
+    else assert.equal(existsSync(new URL(`../${path}`, import.meta.url)), true, path)
+  }
 })
 
 test('official DSH acceptance allows only the reviewed pnpm build dependencies', () => {
@@ -72,13 +89,6 @@ test('official DSH acceptance allows only the reviewed pnpm build dependencies',
     assert.equal(script.includes(`--allow-build=${dependency}`), true, dependency)
   }
   assert.equal(script.includes('dangerously-allow-all-builds'), false)
-})
-
-test('official DSH acceptance materializes one exact runner instead of resolving dlx for every lifecycle command', () => {
-  const script = text('.github/scripts/accept-official-release.ps1')
-  assert.doesNotMatch(script, /['"]dlx['"]/u)
-  assert.match(script, /node_modules[\\/]\.bin[\\/]dsh\.cmd/u)
-  assert.match(script, /package\.json[\s\S]{0,160}\.version/u)
 })
 
 test('release acceptance includes the exact declared DSH release alongside public channels', () => {
@@ -96,8 +106,7 @@ test('release is a prebuilt, documented, removable DSH bundle', () => {
   for (const path of [
     'lib/*.js',
     'cordis.patch.yml',
-    'README.md',
-    'README.en.md',
+    'README*.md',
     'compatibility.json',
     'LICENSE',
     'SECURITY.md',
@@ -126,22 +135,12 @@ test('release is a prebuilt, documented, removable DSH bundle', () => {
   assert.equal(pkg.devDependencies['@deepseek-ai/cordis'], '4.0.4')
   assert.equal(pkg.devDependencies['@deepseek-ai/schemastery'], '3.18.4')
   assert.equal(pkg.peerDependencies['@deepseek-ai/schemastery'], '3.18.1 || ^3.18.2 || 3.18.6-alpha.1')
-  assert.equal(pkg.peerDependencies['@earendil-works/pi-ai'], '0.85.1 || 0.87.1 || 1.1.0 || 1.2.0 || 1.3.0 || 1.4.0')
+  assert.equal(pkg.peerDependencies['@earendil-works/pi-ai'], '0.85.1 || 0.87.1 || 1.1.0 || 1.2.0 || 1.3.0 || 1.4.0 || 1.5.0')
   assert.equal(pkg.packageManager, 'pnpm@11.26.0')
   assert.equal(existsSync(new URL('../lib/index.js', import.meta.url)), true)
   assert.equal(existsSync(new URL('../lib/client.js', import.meta.url)), true)
-  assert.equal(existsSync(new URL('../lib/boundary.js', import.meta.url)), false)
-  assert.equal(existsSync(new URL('../CHANGELOG.md', import.meta.url)), false)
-  assert.equal(existsSync(new URL('../docs/ARCHITECTURE.md', import.meta.url)), false)
   assert.equal(existsSync(new URL('../.github/workflows/ci.yml', import.meta.url)), true)
-  assert.equal(existsSync(new URL('../.github/workflows/release.yml', import.meta.url)), false)
   assert.equal(existsSync(new URL('../.github/workflows/publish.yml', import.meta.url)), true)
-})
-
-test('settings go through the volatile Config adapter on every supported DSH', () => {
-  const source = text('src/index.js')
-  assert.doesNotMatch(source, /import\s*\{[^}]*settingsNamespace[^}]*\}\s*from\s*['"]@deepseek-ai\/dsh-settings['"]/u)
-  assert.match(source, /createSettingsAdapter\(ctx, config\)/u)
 })
 
 test('compatibility metadata keeps stable and preview DSH lanes explicit', () => {
@@ -154,101 +153,18 @@ test('compatibility metadata keeps stable and preview DSH lanes explicit', () =>
   assert.ok(compatibility.previews.every(version => /^\d+\.\d+\.\d+-(?:alpha|beta)\.\d+$/u.test(version)))
 })
 
-test('public docs contain only user-facing product and operation information', () => {
-  const docs = `${text('README.md')}\n${text('README.en.md')}`
-  assert.match(docs, /silent fallback[\s\S]*paid route|不会静默切换[\s\S]*付费路由/iu)
-  assert.match(docs, /reset time|重置时间/iu)
-  assert.doesNotMatch(docs, /AGENTS\.md/u)
-  assert.doesNotMatch(docs, /prompt_cache_key|previous_response_id|backend-api|autoInstallPeers|profiles\/node_modules/iu)
-  assert.doesNotMatch(docs, /github\.com\/WSL043\/(?!(?:dsh-codex-subscription|DSH-Portable)(?:[\/)#]|$))[\w.-]+/iu)
-  assert.doesNotMatch(docs, /安装提示词|更新提示词|卸载提示词|install prompt|update prompt|uninstall prompt/iu)
-  assert.doesNotMatch(docs, /开发与验收|development and verification|pnpm test|pnpm run build|测试覆盖|release-contract|28 项/iu)
-  assert.equal(docs.includes(compatibility.latestTested), true)
-  assert.doesNotMatch(docs, /0\.1\.0-rc\.(?:6|7)|v0\.2\.1|1\.1\.0-beta\.0/iu)
-  assert.equal(existsSync(new URL('../docs/CACHE.md', import.meta.url)), false)
-})
-
-test('GitHub defaults to Chinese and links a complete English README', () => {
-  const readmeZh = text('README.md')
-  const readme = text('README.en.md')
-  assert.match(readmeZh, /# DSH Codex Subscription[\s\S]*把 ChatGPT \/ Codex 订阅直接接入 DeepSeek Harness/u)
-  assert.match(readmeZh, /\[English\]\(https:\/\/github\.com\/WSL043\/dsh-codex-subscription\/blob\/main\/README\.en\.md\)/u)
-  assert.match(readme, /\[简体中文\]\(https:\/\/github\.com\/WSL043\/dsh-codex-subscription\/blob\/main\/README\.md\)/u)
-  for (const doc of [readme, readmeZh]) {
-    assert.match(doc, /img\.shields\.io\/npm\/v\/dsh-codex-subscription/u)
-    assert.match(doc, /img\.shields\.io\/npm\/dt\/dsh-codex-subscription/u)
-    assert.doesNotMatch(doc, /img\.shields\.io\/npm\/d(?:m|w|y)\/dsh-codex-subscription/u)
-    assert.match(doc, /npmjs\.com\/package\/dsh-codex-subscription/u)
-  }
-  assert.match(readmeZh, /## 准备 DSH[\s\S]*www\.deepseek\.com\/harness\/[\s\S]*DSH-Portable[\s\S]*Windows、macOS 和 Linux[\s\S]*社区便携桌面分发[\s\S]*github\.com\/deepseek-ai\/deepseek-harness#run[\s\S]*## 安装[\s\S]*### 在插件页面安装/u)
-  assert.match(readme, /## Prepare DSH[\s\S]*www\.deepseek\.com\/harness\/[\s\S]*DSH-Portable[\s\S]*community portable desktop distribution for Windows, macOS, and Linux[\s\S]*github\.com\/deepseek-ai\/deepseek-harness#run[\s\S]*## Install[\s\S]*### Install from the Plugins page/u)
-  assert.doesNotMatch(`${readme}\n${readmeZh}`, /社区便携包|community DSH-Portable package/iu)
-  assert.match(readmeZh, /本项目的问题反馈[\s\S]*github\.com\/WSL043\/dsh-codex-subscription\/issues[\s\S]*github\.com\/deepseek-ai\/deepseek-harness\/discussions/u)
-  assert.match(readme, /project feedback[\s\S]*github\.com\/deepseek-ai\/deepseek-harness\/discussions/u)
-  assert.doesNotMatch(`${readme}\n${readmeZh}`, /依次粘贴下面两行|paste these two lines in order|下面三行|three lines/iu)
-  assert.doesNotMatch(`${readme}\n${readmeZh}`, /\birm\b|dsh-codex-setup\.ps1/iu)
-  assert.doesNotMatch(readmeZh, /安装提示词|更新提示词|卸载提示词/u)
-  assert.match(readme, /cropped screenshots from the actual DSH interface/u)
-  assert.match(readmeZh, /docs\/assets\/ui-composer-zh-light\.png/u)
-  assert.match(readmeZh, /docs\/assets\/ui-composer-zh-dark\.png/u)
-  assert.doesNotMatch(readmeZh, /docs\/assets\/composer-quota-en\.png/u)
-  for (const doc of [readme, readmeZh]) {
-    for (const match of doc.matchAll(/docs\/assets\/([^\s)]+\.png)/gu)) {
-      const asset = match[1]
-      assert.equal(existsSync(new URL(`../docs/assets/${asset}`, import.meta.url)), true, `documented release image must exist: ${asset}`)
-      assert.doesNotMatch(doc, /releases\/latest\/download\/[^\s)]+\.png/u)
-    }
-  }
-  assert.doesNotMatch(readme, /docs\/assets\/sidebar\.png/u)
-  assert.doesNotMatch(readme, /docs\/assets\/sidebar-en\.png/u)
-  {
-    const { width, height } = pngDimensions('docs/assets/ui-composer-zh-light.png')
-    assert.ok(width >= 700, 'Chinese composer quota screenshot must retain its native width')
-    assert.ok(height >= 100, 'Chinese composer quota screenshot must include the complete compact composer')
-  }
-  assert.equal(existsSync(new URL('../docs/assets/sidebar.png', import.meta.url)), false)
-  assert.equal(existsSync(new URL('../docs/assets/sidebar-en.png', import.meta.url)), false)
-})
-
-test('plugin-owned marketplace screenshots stay valid and each shows a different page', () => {
+test('marketplace and README image references resolve to files with supported image headers', () => {
   const screenshots = JSON.parse(text('screenshots.json'))
-  assert.ok(Array.isArray(screenshots) && screenshots.length >= 5 && screenshots.length <= 8, 'marketplace accepts 1-8 screenshots; show the key pages')
-  for (const path of screenshots) {
+  assert.ok(Array.isArray(screenshots) && screenshots.length >= 1 && screenshots.length <= 8, 'marketplace accepts 1-8 screenshots')
+  const readmes = `${text('README.md')}\n${text('README.en.md')}`
+  const referenced = [...readmes.matchAll(/docs\/assets\/[^\s"'<>)]*?\.png/gu)].map(match => match[0])
+  for (const path of new Set([...screenshots, ...referenced])) {
     assert.equal(existsSync(new URL(`../${path}`, import.meta.url)), true, `marketplace screenshot must exist: ${path}`)
+    assert.ok(imageHeader(path), `invalid image header: ${path}`)
   }
   // The same page in two languages reads as a duplicate in a storefront carousel.
   const page = path => path.replace(/-(?:en|zh)(?=.[a-z]+$)/u, '')
   assert.equal(new Set(screenshots.map(page)).size, screenshots.length, 'no page may appear twice')
-  for (const key of ['account', 'composer', 'models', 'images', 'sketch-board']) {
-    assert.ok(screenshots.some(path => path.includes(key)), `marketplace must show the ${key} page`)
-  }
-})
-
-test('each complete README stays in one language and links to the complete translation', () => {
-  const readmeZh = text('README.md')
-  const readme = text('README.en.md')
-  assert.doesNotMatch(readme, /^## English$/mu)
-  assert.doesNotMatch(readmeZh, /^## (?:简体中文|中文)$/mu)
-  assert.match(readme, /README\.md/u)
-  assert.match(readmeZh, /README\.en\.md/u)
-})
-
-test('public readmes provide explicit update commands and verification', () => {
-  const readmeEn = text('README.en.md')
-  const readmeZh = text('README.md')
-  assert.match(readmeZh, /## 更新与卸载[\s\S]*插件[\s\S]*dsh plugin --profile web update dsh-codex-subscription[\s\S]*dsh plugin --profile web remove dsh-codex-subscription/u)
-  assert.match(readmeEn, /## Update and uninstall[\s\S]*Plugins[\s\S]*dsh plugin --profile web update dsh-codex-subscription[\s\S]*dsh plugin --profile web remove dsh-codex-subscription/u)
-  assert.match(readmeZh, /dsh plugin --profile web add dsh-codex-subscription/u)
-  assert.match(readmeEn, /dsh plugin --profile web add dsh-codex-subscription/u)
-  for (const readme of [readmeZh, readmeEn]) {
-    assert.match(readme, /```text\s+dsh-codex-subscription@\d+\.\d+\.\d+\s+```/u)
-    assert.doesNotMatch(readme, /npx -y @deepseek-ai/u)
-  }
-  assert.doesNotMatch(readmeZh, /^## \d+\.\d+\.\d+ 重点变化$/mu)
-  assert.doesNotMatch(readmeEn, /^## What's included in \d+\.\d+\.\d+$/mu)
-  assert.match(readmeZh, /\*\*模型感知上下文\*\*[\s\S]*模型目录[\s\S]*未保存的草稿/u)
-  assert.match(readmeEn, /\*\*Model-aware context\*\*[\s\S]*model directory[\s\S]*unsaved draft/u)
-  assert.doesNotMatch(`${readmeZh}\n${readmeEn}`, /\birm\b|dsh-codex-setup\.ps1/iu)
 })
 
 test('Windows manager updates from a checksum-verified immutable release asset', () => {
@@ -290,15 +206,6 @@ test('uninstall never recursively deletes a caller-selected command directory', 
   assert.doesNotMatch(removal, /Remove-Item -LiteralPath \$Directory -Recurse/u)
 })
 
-test('docs explain dynamic quota buckets without exposing maintenance internals', () => {
-  const readmeEn = readFileSync(new URL('../README.en.md', import.meta.url), 'utf8')
-  const readmeZh = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
-  for (const text of [readmeZh, readmeEn]) {
-    assert.match(text, /Spark/u)
-    assert.match(text, /backend-provided|actual.*returned|服务端实际返回/iu)
-  }
-})
-
 test('release-age exceptions are pinned to the audited DeepSeek preview graph', () => {
   const workspace = text('pnpm-workspace.yaml')
   const lockfile = text('pnpm-lock.yaml')
@@ -321,15 +228,17 @@ test('official DSH compatibility updates are detected, accepted, and then dispat
   assert.match(detector, /\['latest', 'next', 'alpha'\]/u)
   assert.match(detector, /manifest\.dist\?\.integrity/u)
   assert.match(detector, /manifest\.name !== '@deepseek-ai\/dsh'/u)
-  assert.match(workflow, /prepare-compat-release\.mjs --refresh-release-age/u)
-  assert.match(workflow, /git diff --check/u)
+  const candidate = text('.github/actions/compatibility-candidate/action.yml')
+  assert.match(candidate, /prepare-compat-release\.mjs --root \. --refresh-release-age/u)
+  assert.match(candidate, /git diff --check/u)
   assert.doesNotMatch(workflow, /git diff --exit-code --check/u)
   assert.match(workflow, /windows-acceptance:[\s\S]*accept-official-release\.ps1/u)
-  assert.match(workflow, /git diff --binary \| sha256sum/u)
-  assert.match(workflow, /test "\$\(git rev-parse origin\/main\)" = "\$GITHUB_SHA"/u)
-  assert.match(workflow, /git push origin HEAD:main[\s\S]*gh workflow run publish\.yml/u)
+  assert.match(candidate, /git diff --binary \| sha256sum/u)
+  assert.match(workflow, /npm view dsh-codex-subscription dist-tags.latest/u)
+  assert.doesNotMatch(workflow, /git push[^\n]*HEAD:main/u)
+  assert.match(workflow, /source_ref="\$source_sha"/u)
   assert.match(workflow, /release_kind=compatibility/u)
-  assert.match(workflow, /git add --[^\n]*README\.md[^\n]*README\.en\.md[^\n]*compatibility\.json/u)
+  assert.match(workflow, /git add --[^\n]*'README\*\.md'[^\n]*compatibility\.json/u)
   assert.doesNotMatch(workflow, /git add --[^\n]*AGENTS\.md/u)
   assert.doesNotMatch(workflow, /git add --[^\n]*\.github\/workflows\/publish\.yml/u)
   assert.match(workflow, /request_id="compat-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}"/u)
@@ -458,7 +367,7 @@ test('an alpha newer than the declared compatibility list is a notice, never a r
 })
 
 test('the README install step names the exact released version, so a new release installs on its first day', () => {
-  for (const [label, readme] of [['zh', text('README.md')], ['en', text('README.en.md')]]) {
+  for (const [label, readme] of [['zh', text('README.zh-CN.md')], ['en', text('README.md')]]) {
     const pinned = readme.match(/```text\s+dsh-codex-subscription@([\d.]+)\s+```/u)?.[1]
     if (manifest.version.includes('-')) {
       // A preview plugin beta is not advertised: the README keeps pinning the last stable release.

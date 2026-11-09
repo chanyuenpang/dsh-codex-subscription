@@ -1,6 +1,7 @@
 import { PhotoIcon, ArrowPathIcon, ExclamationCircleIcon } from '@heroicons/react/24/outline'
 import { officialImageTools } from './image-official-tools.js'
-import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { ImageLightbox } from './client-primitives.jsx'
 import { useImageSource } from './use-image-source.js'
 import { buildImageEditDraft } from './image-edit.js'
 import { decodeImagePresentation } from './image-original-contract.js'
@@ -27,6 +28,7 @@ function triggerBlobDownload(data, mediaType, filename) {
 function CodexGeneratedImage({ attachment, original, gallery, rpc, sessionId, loadImage, openSketchImage, attachForEdit, getImageViewer, getInternalImageViewer, t, features }) {
   const reload = useCallback(() => loadImage(attachment), [attachment, loadImage])
   const { src, failed: error, fail, retry, attempt, usable, loaded } = useImageSource(reload, attachment.attachmentId ?? attachment)
+  const [nativePreview, setNativePreview] = useState()
   const triggerRef = useRef(null)
   const opening = useRef(0)
   useEffect(() => () => { opening.current++ }, [attachment])
@@ -48,44 +50,56 @@ function CodexGeneratedImage({ attachment, original, gallery, rpc, sessionId, lo
         },
         actions: !features.imageEditing ? [] : [{
           id: 'continue-editing', label: t('imageEdit'), pendingLabel: t('imageEditPreparing'), errorLabel: t('imageEditFailed'), closeOnSuccess: true,
-          onInvoke: ({ annotations = [], signal }) => {
-            const imageKey = String(attachment.attachmentId ?? 'image').replace(/[^a-zA-Z0-9_-]/g, '_')
-            const sourceName = annotations.length === 0 ? downloadName : `codex-edit-${imageKey}-source.png`
-            const referenceName = `codex-edit-${imageKey}-annotations.png`
-            return attachForEdit(editSource, sourceName, buildImageEditDraft({ annotations, translate: t,
-              width: original?.width ?? attachment.width, height: original?.height ?? attachment.height, sourceName, referenceName,
+          onInvoke: ({ annotations = [], src: preview, signal }) => {
+            const imageKey = String(attachment.attachmentId ?? 'image').replace(/^sha256:/u, '').slice(0, 12).replace(/[^a-zA-Z0-9_-]/gu, '_')
+            const sourceName = annotations.length === 0 ? downloadName : `edit-${imageKey}.png`
+            const referenceName = `pins-${imageKey}.png`
+            return attachForEdit(editSource ?? preview, sourceName, buildImageEditDraft({ annotations, translate: t,
+              sourceName, referenceName,
             }), annotations, referenceName, false, undefined, { signal })
           },
-        }, ...officialImageTools({ src: editSource, name: downloadName, t, attachForEdit }), ...(features.imageSketch && openSketchImage ? [{id:'sketch',label:t('imageToSketch'),pendingLabel:t('imageEditPreparing'),errorLabel:t('imageEditFailed'),onInvoke:()=>openSketchImage(src,downloadName)}] : [])],
+        }, ...officialImageTools({ src: editSource, name: downloadName, t, attachForEdit }), ...(features.imageSketch && openSketchImage ? [{id:'sketch',label:t('imageToSketch'),pendingLabel:t('imageEditPreparing'),errorLabel:t('imageEditFailed'),onInvoke:({ src: preview = src })=>openSketchImage(preview,downloadName)}] : [])],
     }
   }
   const openImage = async () => {
     if (src === undefined) return
     const revision = ++opening.current
-    const items = await Promise.all((gallery ?? [{ attachment, original }]).map(async image => makeItem(image.attachment, image.original,
-      image.attachment === attachment ? src : await loadImage(image.attachment).catch(() => 'about:blank'))))
-    if (revision !== opening.current) return
+    const selectedIndex = gallery?.findIndex(image => image.attachment === attachment || (attachment.attachmentId && image.attachment.attachmentId === attachment.attachmentId)) ?? -1
+    const group = selectedIndex < 0 ? [...(gallery ?? []), { attachment, original }] : gallery
+    const index = selectedIndex < 0 ? group.length - 1 : selectedIndex
+    const items = group.map((image, position) => makeItem(image.attachment, image.original, position === index ? src : undefined))
     const request = {
       items,
-      index: Math.max(0, items.findIndex(item => item.id === attachment.attachmentId)),
+      index,
       opener: triggerRef.current,
       source: 'codex-generated',
       scope: sessionId,
       annotations: features.imageViewer && features.imageAnnotations,
     }
-    if (features.imageViewer && getInternalImageViewer?.()?.open?.(request) === true) return
+    const internalViewer = features.imageViewer ? getInternalImageViewer?.() : undefined
+    if (internalViewer?.open?.(request) === true) return
     const viewer = getImageViewer?.()
-    if (viewer?.open?.(request) === true) return
-    if (features.imageViewer) getInternalImageViewer?.()?.open?.({ ...request, annotations: false })
-    else window.open(src, '_blank', 'noopener,noreferrer')
+    if (typeof viewer?.open === 'function') {
+      // Older external viewers require a URL for every image.
+      const resolved = await Promise.all(group.map(async (image, position) => position === index ? items[index] :
+        makeItem(image.attachment, image.original, await loadImage(image.attachment).catch(() => 'about:blank'))))
+      if (revision !== opening.current || viewer.open({ ...request, items: resolved }) === true) return
+    }
+    if (features.imageViewer) internalViewer?.open?.({ ...request, annotations: false })
+    else setNativePreview({ attachment, src })
   }
   if (error && !usable) {
     return <button type="button" className="codexGeneratedImageRetry" onClick={retry}>{t('imageLoadFailed')}</button>
   }
-  return <button ref={triggerRef} type="button" className="codexGeneratedImageFrame" title={error ? t('imageLoadFailed') : t('imageOpen')} aria-label={t('imageOpenNamed').replace('{value}', String(label))} onClick={error ? retry : openImage}>
-    {src === undefined ? <span>{t('imageLoading')}</span> : <img key={attempt} src={src} onError={fail} onLoad={loaded} alt={label} />}
-    {error ? <span>{t('imageLoadFailed')}</span> : null}
-  </button>
+  return <>
+    <button ref={triggerRef} type="button" className="codexGeneratedImageFrame" title={error ? t('imageLoadFailed') : t('imageOpen')} aria-label={t('imageOpenNamed').replace('{value}', String(label))} onClick={error ? retry : openImage}>
+      {src === undefined ? <span>{t('imageLoading')}</span> : <img key={attempt} src={src} onError={fail} onLoad={loaded} alt={label} />}
+      {error ? <span>{t('imageLoadFailed')}</span> : null}
+    </button>
+    {nativePreview?.attachment === attachment && !features.imageViewer ? <ImageLightbox
+      src={nativePreview.src} alt={label} labels={{ dialog: t('imagePreview'), close: t('imageClosePreview') }}
+      onClose={() => setNativePreview(undefined)} /> : null}
+  </>
 }
 
 export function CodexImageToolRow({ presentation = 'tool', block, gallery, sessionId, rpc, loadImage, openSketchImage, attachForEdit, getImageViewer, getInternalImageViewer, t, preference }) {

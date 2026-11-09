@@ -7,6 +7,7 @@ import { hoistLeadingSystem, runtimeVersions, understandsSystemMessages } from '
 import { openaiCodexProvider as createOpenAICodexProvider } from '@earendil-works/pi-ai/providers/openai-codex'
 import { normalizeTransportEvent, safeFetchFailure } from './transport-failure.js'
 import { createModelRetryBridge } from './model-retry-hint.js'
+import { authFailureMessage } from './http-failure.js'
 import { createModelAttempt } from './model-attempt.js'
 import { effectiveContextWindow } from './context-budget.js'
 import { createModelStreamHealth } from './model-stream-health.js'
@@ -114,6 +115,7 @@ export function openaiCodexSubscriptionProvider({
   reasoning,
   ultra,
   runNetwork = (_area, operation) => operation(),
+  runOAuthRefresh = operation => operation(),
   beginModelAttempt = createModelAttempt,
   providerFactory = createOpenAICodexProvider,
 } = {}) {
@@ -286,12 +288,15 @@ export function openaiCodexSubscriptionProvider({
       if (status === 'failed') noteStreamFailure(stage, error, effectiveSource, networkFailure, attempt.snapshot().attemptId)
       attempt.finish(status, stage)
     }
+    const finish = () => {
+      const { status, transports } = attempt.snapshot()
+      request?.finish?.({ status, transports })
+    }
     const initialize = async () => {
-      // Explicitly forced SSE (cloud compaction/review) must not reserve a recovery probe.
       const overrides = direct ? undefined : compaction?.networkOptions(undefined)
       request = await (direct ? undefined : connection?.prepare({ ...options, signal }, { model: source?.model, allowWebSocket: overrides?.websocket !== false })) ?? { options }
       const next = { ...(direct ? { ...request.options, transport: 'sse' } : compaction?.requestOptions(request.options) ?? request.options), signal }
-      attempt.configure({ ...request.diagnostic, requestedTransport: next.transport ?? 'auto', ...(direct ? { selectionReason: 'forced-sse' } : {}) })
+      attempt.configure({ preference: request.diagnostic?.preference ?? request.options?.transport ?? 'auto', requestedTransport: next.transport ?? 'auto' })
       effectiveSource = { ...source, options: next }
       health = streamHealth.begin({ sessionId: direct ? undefined : options?.sessionId, configured: request.options?.transport, selected: next.transport })
       const scopedNetwork = direct ? request.network : overrides ?? request.network
@@ -301,6 +306,11 @@ export function openaiCodexSubscriptionProvider({
         onRoute(route) { attempt.route(route); scopedNetwork?.onRoute?.(route) },
         onTransport(transport) { attempt.transport(transport); scopedNetwork?.onTransport?.(transport) },
         onFetchFailure(error) { networkFailure = safeFetchFailure(error); attempt.fetchFailure(error); scopedNetwork?.onFetchFailure?.(error) },
+        async transformResponse(response, target) {
+          const value = await (scopedNetwork?.transformResponse?.(response, target) ?? response)
+          if (retryHint) retryHint.onAccessFailure(value.ok ? undefined : await authFailureMessage(value))
+          return value
+        },
       } }
     }
     const step = async (method, value) => {
@@ -320,13 +330,12 @@ export function openaiCodexSubscriptionProvider({
               },
             })
             iterator = producer[Symbol.asyncIterator]()
-            // SDK result settles after its socket release, even if the consumer stops
-            // iterating. Do not free a recovery lease merely because return() was called.
+            // The producer settles even if the caller stops consuming its iterator.
             producer.result().then(message => {
               const status = cancelled() ? (stopped ? 'abandoned' : 'cancelled') : ['error', 'aborted'].includes(message?.stopReason) ? 'failed' : 'ok'
               settle(status, undefined, message)
-              request.finish?.({ ...attempt.snapshot(), status })
-            }, error => { settle(cancelled() ? 'cancelled' : 'failed', error); request.finish?.(attempt.snapshot()) })
+              finish()
+            }, error => { settle(cancelled() ? 'cancelled' : 'failed', error); finish() })
           }
           return iterator[method]?.(value) ?? (method === 'throw' ? Promise.reject(value) : Promise.resolve({ done: true, value }))
         }, network)
@@ -341,7 +350,7 @@ export function openaiCodexSubscriptionProvider({
         return result.done ? result : { ...result, value: normalizeTransportEvent(result.value, signal) }
       } catch (error) {
         settle(stopped ? 'abandoned' : cancelled() || error?.name === 'AbortError' ? 'cancelled' : 'failed', error)
-        if (!producer) request?.finish?.(attempt.snapshot())
+        if (!producer) finish()
         throw error
       }
     }
@@ -352,7 +361,7 @@ export function openaiCodexSubscriptionProvider({
         const status = options?.signal?.aborted ? options.signal.reason?.name === 'TimeoutError' ? 'failed' : 'cancelled' : 'abandoned'
         stopped = true; cancellation.abort(); settle(status)
         if (prepared) await prepared.catch(() => {})
-        if (!producer) request?.finish?.(attempt.snapshot())
+        if (!producer) finish()
         return iterator?.return?.(value) ?? { done: true, value }
       },
       throw: error => step('throw', error),
@@ -370,7 +379,14 @@ export function openaiCodexSubscriptionProvider({
   }
   return Object.freeze({
     ...provider,
-    auth: Object.freeze({ ...provider.auth, apiKey: requestToken }),
+    auth: Object.freeze({
+      ...provider.auth,
+      oauth: {
+        ...provider.auth.oauth,
+        refresh: (credential, signal) => runOAuthRefresh(() => provider.auth.oauth.refresh(credential, signal), signal),
+      },
+      apiKey: requestToken,
+    }),
     getModels,
     stream: (model, context, options) => routed('stream', model, context, options),
     streamSimple: (model, context, options) => routed('streamSimple', model, context, options),
@@ -382,4 +398,4 @@ export function openaiCodexSubscriptionProvider({
   })
 }
 
-export const PI_AI_RUNTIME_VERSIONS = Object.freeze(['0.85.1', '0.87.1', '1.1.0', '1.2.0', '1.3.0', '1.4.0'])
+export const PI_AI_RUNTIME_VERSIONS = Object.freeze(['0.85.1', '0.87.1', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0'])

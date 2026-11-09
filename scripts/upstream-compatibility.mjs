@@ -3,10 +3,16 @@ import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { compareVersions } from './prepare-compat-release.mjs'
+import { publishedBaseline } from './compatibility-baseline.mjs'
 
 const exact = value => typeof value === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(value)
 const preview = version => /-(?:alpha|beta|dev|nightly|canary)(?:\.|$)/iu.test(version)
 const declared = manifest => new Set(String(manifest.peerDependencies?.['@deepseek-ai/dsh-llm'] ?? '').split('||').map(x => x.trim()).filter(exact))
+
+function testedVersions(compatibility, manifest) {
+  const supported = declared(manifest)
+  return new Set([...compatibility.supported, ...(compatibility.previews ?? [])].filter(version => supported.has(version)))
+}
 
 export function selectChannelCandidate(tags, published, compatibility, { requested, dryRun = false } = {}) {
   const entries = ['latest', 'next', 'alpha'].flatMap(channel => exact(tags[channel]) ? [{ channel, version: tags[channel] }] : [])
@@ -25,21 +31,6 @@ export function selectChannelCandidate(tags, published, compatibility, { request
   candidates.sort((a, b) => Number(preview(a.version)) - Number(preview(b.version)) || compareVersions(b.version, a.version))
   const entry = candidates[0]
   return entry && { ...entry, stable: !preview(entry.version), recheck: false }
-}
-
-// These files are excluded from the npm package. Runtime, install instructions,
-// dependency metadata and unknown paths must still wait for a manual release.
-const automationOnly = new Set([
-  '.github/workflows/upstream-compatibility.yml', // retired workflow path
-  '.github/workflows/compatibility-autopilot.yml',
-  'scripts/upstream-compatibility.mjs',
-  'tests/upstream-compatibility.test.mjs',
-  'tests/release-contract.test.mjs',
-])
-
-export function baselineHold(published, current, changedFiles) {
-  if (published.version !== current.version) return 'A manually prepared plugin release is not yet on npm'
-  if (changedFiles.some(file => !automationOnly.has(file))) return 'Main contains unreleased changes; automatic compatibility publication would include them'
 }
 
 export async function registryJson(url, fetcher = fetch, pause = ms => new Promise(done => setTimeout(done, ms))) {
@@ -69,13 +60,28 @@ async function github(path, init = {}) {
   return response.status === 204 ? undefined : response.json()
 }
 const marker = version => `<!-- dsh-compatibility:${version} -->`
-async function openReports() {
+async function openReports(request = github) {
   const issues = []
   for (let page = 1; ; page++) {
-    const batch = await github(`issues?state=open&per_page=100&page=${page}`)
+    const batch = await request(`issues?state=open&per_page=100&page=${page}`)
     issues.push(...batch.filter(x => !x.pull_request))
     if (batch.length < 100) return issues
   }
+}
+
+export async function closeResolvedReports(compatibility, manifest, request = github) {
+  const tested = testedVersions(compatibility, manifest)
+  const closed = []
+  for (const issue of await openReports(request)) {
+    if (issue.user?.type !== 'Bot' || issue.user.login !== 'github-actions[bot]') continue
+    const version = /^<!-- dsh-compatibility:([^\s]+) -->/u.exec(issue.body ?? '')?.[1]
+    if (!tested.has(version) || issue.title !== `DSH ${version} 自动兼容检查需要处理`) continue
+    await request(`issues/${issue.number}`, { method: 'PATCH', body: JSON.stringify({
+      state: 'closed', state_reason: 'completed',
+    }) })
+    closed.push(issue.number)
+  }
+  return closed
 }
 async function output(values) {
   if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT,
@@ -84,12 +90,12 @@ async function output(values) {
 }
 
 async function detect() {
-  const [tags, published, compatibility, current] = await Promise.all([
+  const [tags, published] = await Promise.all([
     registryJson('https://registry.npmjs.org/-/package/@deepseek-ai%2Fdsh/dist-tags'),
     registryJson('https://registry.npmjs.org/dsh-codex-subscription/latest'),
-    readFile('compatibility.json', 'utf8').then(JSON.parse), readFile('package.json', 'utf8').then(JSON.parse),
   ])
-  if (published.name !== current.name || !exact(published.version)) throw new Error('Invalid published plugin identity')
+  const baseline = publishedBaseline(published)
+  const compatibility = JSON.parse(execFileSync('git', ['show', `${baseline.sha}:compatibility.json`], { encoding: 'utf8' }))
   const dryRun = process.env.DRY_RUN === 'true'
   const candidate = selectChannelCandidate(tags, published, compatibility, { requested: process.env.REQUESTED_VERSION, dryRun })
   if (!candidate) return output({ changed: false, blocked: false })
@@ -98,18 +104,13 @@ async function detect() {
     || !manifest.dist?.integrity || !manifest.dist?.tarball?.startsWith('https://registry.npmjs.org/')) {
     throw new Error('Official npm package identity or integrity is missing')
   }
-  let hold
   if (!dryRun) {
-    if (published.version !== current.version) return output({ changed: false, blocked: false, reason: 'Waiting for prepared manual release' })
-    execFileSync('git', ['fetch', '--no-tags', 'origin', `refs/tags/v${published.version}:refs/tags/v${published.version}`], { stdio: 'pipe' })
-    const files = execFileSync('git', ['diff', '--name-only', `v${published.version}`, 'HEAD'], { encoding: 'utf8' }).trim().split('\n').filter(Boolean)
-    hold = baselineHold(published, current, files)
     if ((await openReports()).some(issue => issue.body?.includes(marker(candidate.version)))) {
       return output({ changed: false, blocked: false, reason: 'An open compatibility report already tracks this version' })
     }
   }
-  await output({ changed: !hold, blocked: Boolean(hold), reason: hold ?? '', dsh_version: candidate.version,
-    stable: candidate.stable, recheck: candidate.recheck, published_version: published.version })
+  await output({ changed: true, blocked: false, reason: '', dsh_version: candidate.version,
+    stable: candidate.stable, recheck: candidate.recheck, published_version: published.version, baseline_sha: baseline.sha })
 }
 
 async function report() {
@@ -127,5 +128,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const mode = process.argv[2]
   if (mode === 'detect') await detect()
   else if (mode === 'report') await report()
-  else throw new Error('Expected detect or report')
+  else if (mode === 'close-resolved') {
+    const [compatibility, manifest] = await Promise.all([
+      readFile('compatibility.json', 'utf8').then(JSON.parse), readFile('package.json', 'utf8').then(JSON.parse),
+    ])
+    await output({ closed: await closeResolvedReports(compatibility, manifest) })
+  } else throw new Error('Expected detect, report, or close-resolved')
 }

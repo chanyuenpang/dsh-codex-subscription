@@ -3,7 +3,6 @@ import { safeFetchFailure } from './transport-failure.js'
 
 const transports = new Set(['sse', 'websocket'])
 const choices = new Set(['sse', 'websocket', 'websocket-cached', 'auto', 'unknown'])
-const reasons = new Set(['configured-sse', 'websocket-preferred', 'forced-sse', 'no-session', 'ws-cooldown', 'ws-probe', 'probe-busy', 'capacity', 'disposed'])
 const routes = new Set(['direct', 'environment', 'system', 'bypass', 'proxy', 'unknown'])
 const phases = new Set(['prepare', 'request', 'payload', 'stream'])
 const elapsedBuckets = new Set(['under-1s', '1-5s', '5-15s', 'over-15s'])
@@ -17,15 +16,12 @@ export function safeAttempt(value = {}) {
     ...(identified && phases.has(value.stage) ? { stage: value.stage } : {}),
     ...(identified && elapsedBuckets.has(value.elapsed) ? { elapsed: value.elapsed } : {}),
     ...(typeof value.attemptId === 'string' && /^[a-f0-9-]{36}$/.test(value.attemptId) ? { attemptId: value.attemptId } : {}),
-    ...(typeof value.scope === 'string' && /^dsh-[a-f0-9]{56}$/.test(value.scope) ? { scope: value.scope } : {}),
     ...(choices.has(value.preference) ? { preference: value.preference } : {}),
     ...(choices.has(value.requestedTransport) ? { requestedTransport: value.requestedTransport } : {}),
-    ...(reasons.has(value.selectionReason) ? { selectionReason: value.selectionReason } : {}),
     ...(Array.isArray(value.transports) ? { transports: value.transports.filter(item => transports.has(item)).slice(0, 8) } : {}),
     ...(typeof value.headersReceived === 'boolean' ? { headersReceived: value.headersReceived } : {}),
     ...(typeof value.eventDelivered === 'boolean' ? { eventDelivered: value.eventDelivered } : {}),
     ...(typeof value.contentDelivered === 'boolean' ? { contentDelivered: value.contentDelivered } : {}),
-    ...(Number.isInteger(value.cooldownMs) && value.cooldownMs >= 0 && value.cooldownMs <= 360000 ? { cooldownMs: value.cooldownMs } : {}),
     ...(typeof value.networkFailure === 'string' && value.networkFailure.length <= 256 && /^fetch failed(?: \[[A-Z_, ]+\])?$/.test(value.networkFailure)
       && safeFetchFailure({ errors: (value.networkFailure.match(/[A-Z][A-Z_]+/g) ?? []).map(code => ({ code })) }) === value.networkFailure ? { networkFailure: value.networkFailure } : {}),
   }

@@ -20,11 +20,11 @@ test('manual validation runs every gate even when the last commit only changed a
   const result = plan(['tests/remote-history-source.test.mjs'], '1.10.0', '1.10.0', 'workflow_dispatch')
   assert.equal(result.status, 0, result.stderr)
   assert.deepEqual(JSON.parse(result.stdout).plan, { behavior: true, delivery: true, manager: true, official: true, runtime: true })
-  assert.notEqual(plan([], '1.9.0', '1.10.0', 'workflow_dispatch').status, 0)
+  assert.equal(plan([], '1.9.0', '1.10.0', 'workflow_dispatch').status, 0)
 })
 
 test('documentation and marketplace screenshot changes run delivery checks without pretending runtime changed', () => {
-  for (const file of ['README.md', 'README.en.md', 'CONTRIBUTING.md', 'screenshots.json']) {
+  for (const file of ['README.md', 'README.en.md', 'README.zh-CN.md', 'README.ja.md', 'README.es.md', 'README.fr.md', 'README.de.md', 'README.ru.md', 'README.pt.md', 'CONTRIBUTING.md', 'screenshots.json']) {
     const result = plan([file])
     assert.equal(result.status, 0, result.stderr)
     const output = JSON.parse(result.stdout)
@@ -45,9 +45,12 @@ test('previously omitted suites and future behavior tests reach their CI gate', 
     assert.equal(JSON.parse(result.stdout).plan.behavior, true, file)
     if (file !== 'future-behavior') assert.ok(testFiles('behavior').includes(`tests/${file}.test.mjs`), file)
   }
-  const viewerContract = plan(['tests/subscription-image-viewer-contract.test.mjs'])
-  assert.equal(JSON.parse(viewerContract.stdout).plan.delivery, true)
-  assert.ok(testFiles('delivery').includes('tests/subscription-image-viewer-contract.test.mjs'))
+  for (const file of ['subscription-settings-entry', 'composer-prediction-preferences', 'settings-panel-lifecycle']) {
+    const path = `tests/${file}.test.mjs`
+    assert.equal(JSON.parse(plan([path]).stdout).plan.delivery, true)
+    assert.ok(testFiles('delivery').includes(path))
+    assert.equal(testFiles('behavior').includes(path), false)
+  }
 })
 
 test('test dispatch changes exercise all CI gates', () => {
@@ -68,10 +71,11 @@ test('unreleased runtime changes keep all acceptance gates at the current stable
   })
 })
 
-test('runtime metadata cannot lag behind the published stable version', () => {
+test('an independent published compatibility patch does not block testing main changes', () => {
   const result = plan(['src/index.js'], '1.9.0')
-  assert.equal(result.status, 1)
-  assert.match(result.stderr, /package\.json 1\.9\.0 is behind published 1\.10\.0/u)
+  assert.equal(result.status, 0)
+  assert.equal(JSON.parse(result.stdout).plan.official, true)
+  assert.match(result.stderr, /compatibility releases can advance independently/u)
 })
 
 test('a versioned runtime change runs behavior and installed-product acceptance', () => {

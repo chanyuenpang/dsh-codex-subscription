@@ -1,7 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createSubagentTokens } from '../src/subagent-auth.js'
-import { createSubagentBackendSwitcher, presetEntries, SUBAGENT_PROVIDER, subagentThreadPolicy } from '../src/subagent-backend.js'
+import { createSubagentBackendSwitcher, presetEntries, subagentConfigListener, SUBAGENT_PROVIDER, subagentThreadPolicy } from '../src/subagent-backend.js'
+import { Context } from '@deepseek-ai/cordis'
+import { createSubagentDefaults } from '../src/subagent-defaults.js'
 
 test('subscription subagent pins account and serializes concurrent token rotation', async () => {
   let current = { type: 'oauth', accountId: 'a', access: 'old' }
@@ -21,6 +23,7 @@ test('subscription subagent pins account and serializes concurrent token rotatio
 })
 
 const childFeatures = Object.fromEntries(['apps', 'plugins', 'plugin_sharing', 'remote_plugin', 'tool_suggest', 'browser_use', 'browser_use_external', 'browser_use_full_cdp_access', 'computer_use', 'in_app_browser'].map(name => [name, false]))
+if (process.platform === 'win32') childFeatures.prefer_mxc = true
 test('subagent policy takes parent model effort and sandbox, never user Codex defaults', () => {
   assert.deepEqual(subagentThreadPolicy({ session: { requestHeader: () => ({ config: {
     provider: 'openai-codex', model: 'gpt-5.6-luna', reasoningEffort: 'max',
@@ -36,6 +39,55 @@ function entry(provider, extra = {}) {
     config: { provider, ...extra }, async update(value, transient) { assert.equal(transient, true); this.config = value },
   } }
 }
+
+test('global config middleware preserves configless runtime plugins and delayed injections', async () => {
+  const ctx = new Context()
+  const switcher = createSubagentBackendSwitcher({ entries: () => [], prepare: async () => {} })
+  const off = ctx.on('internal/config', subagentConfigListener(switcher), { global: true })
+  let pluginApplied = 0, injectionApplied = 0
+  const runtime = ctx.plugin({ name: 'configless-runtime', apply() { pluginApplied++ } })
+  const injection = ctx.inject(['issue240Dependency'], () => { injectionApplied++ })
+  let unprovide
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(pluginApplied, 1, 'runtime plugin must activate without a Loader entry or config')
+    assert.equal(injectionApplied, 0)
+    unprovide = ctx.provide('issue240Dependency', {})
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(injectionApplied, 1, 'pending injection must activate when its dependency arrives')
+  } finally {
+    off()
+    await Promise.all([runtime.dispose(), injection.dispose()])
+    unprovide?.()
+    await switcher.dispose()
+  }
+})
+
+for (const modern of [false, true]) test(`config waterfall preserves owner, next and restoration on ${modern ? 'new' : 'legacy'} Cordis events`, async () => {
+  const ctx = new Context()
+  const dormant = { options: { name: '@deepseek-ai/dsh-tool-subagent', config: { provider: 'spawn' } } }
+  const switcher = createSubagentBackendSwitcher({ entries: () => [dormant], prepare: async () => {} })
+  const off = ctx.on('internal/config', subagentConfigListener(switcher), { global: true })
+  let calls = 0
+  const resolve = (item, config) => {
+    const next = () => { calls++; return config }
+    return modern ? ctx.waterfall('internal/config', item.fiber, next) : ctx.waterfall(item.fiber, 'internal/config', config, next)
+  }
+  try {
+    const spawn = entry('spawn'), fork = entry('fork'), custom = entry('spawn', { persona: 'custom' }), unrelated = entry('spawn')
+    for (const item of [spawn, fork, custom]) item.fiber.entry = item
+    unrelated.fiber.entry = { options: { name: 'unrelated' } }
+    const original = spawn.fiber.config
+    assert.equal(resolve(spawn, original), original, 'default backend passes the original through')
+    await switcher.select('codex')
+    spawn.fiber.config = resolve(spawn, original)
+    assert.equal(spawn.fiber.config.provider, SUBAGENT_PROVIDER)
+    for (const item of [fork, custom, unrelated]) assert.equal(resolve(item, item.fiber.config), item.fiber.config)
+    assert.equal(calls, 5, 'each middleware continuation runs exactly once')
+    await switcher.select('dsh')
+    assert.deepEqual(spawn.fiber.config, original)
+  } finally { off(); await switcher.dispose() }
+})
 test('explicit child route overrides inheritance without silently changing effort or permissions', () => {
   const parent = { session: { requestHeader: () => ({config: {provider:'openai-codex',model:'gpt-6-astra',reasoningEffort:'ultra'}}) } }
   const policy = {mode:'read-only'}
@@ -49,6 +101,40 @@ test('explicit child route overrides inheritance without silently changing effor
   assert.equal(subagentThreadPolicy(other,policy,{provider:'openai-codex',model:'gpt-5.6-luna'}).model,'gpt-5.6-luna')
   assert.throws(()=>subagentThreadPolicy(parent,policy,{provider:'deepseek',model:'deepseek'}), /require the openai-codex/)
   assert.throws(()=>subagentThreadPolicy(parent,policy,{sandbox:'danger-full-access'}), /Unsupported Codex child option/)
+})
+
+test('saved Codex subtask defaults honor explicit requests and both allowlists', () => {
+  const parent = { session: { requestHeader: () => ({ config: { provider: 'openai-codex', model: 'gpt-6.1-sol', reasoningEffort: 'high' } }) } }
+  const settings = { subagentDefaultModel: 'gpt-6-luna', subagentDefaultEffort: 'low' }
+  const route = model => ({ provider: 'openai-codex', model })
+  let host = { enabled: true, allowedModels: [route('gpt-6-luna')] }
+  let savedRoutes = [route('gpt-6-luna')]
+  const defaults = createSubagentDefaults({
+    readSettings: () => settings, modelSelection: () => host,
+    projections: () => ({ stateOf: () => savedRoutes }),
+    catalog: { getModels: () => [{ id: 'gpt-6-luna' }, { id: 'gpt-6.1-sol' }],
+      metadata: () => ({ thinkingLevelMap: { low: 'low' } }) },
+  })
+  const resolve = requested => subagentThreadPolicy(parent, { mode: 'read-only' }, defaults.resolve(parent, requested))
+  assert.deepEqual(defaults.list().map(x => x.id), ['gpt-6-luna'])
+  assert.deepEqual([resolve().model, resolve().config.model_reasoning_effort], ['gpt-6-luna', 'low'])
+  assert.deepEqual([resolve({ reasoningEffort: 'xhigh' }).model, resolve({ reasoningEffort: 'xhigh' }).config.model_reasoning_effort], ['gpt-6.1-sol', 'xhigh'])
+  assert.equal(resolve({ model: 'gpt-6.1-sol' }).config.model_reasoning_effort, undefined)
+  settings.subagentDefaultEffort = 'max'
+  assert.equal(resolve().model, 'gpt-6-luna')
+  assert.equal(resolve().config.model_reasoning_effort, undefined)
+  savedRoutes = [route('gpt-6.1-sol')]
+  assert.deepEqual([resolve().model, resolve().config.model_reasoning_effort], ['gpt-6.1-sol', 'high'])
+  savedRoutes = [route('gpt-6-luna')]
+  host = { enabled: true, allowedModels: [route('gpt-6.1-sol')] }
+  assert.equal(resolve().model, 'gpt-6.1-sol')
+  host = { enabled: false }
+  settings.disabledModels = ['gpt-6-luna']
+  assert.equal(resolve().model, 'gpt-6.1-sol')
+  settings.subagentDefaultModel = ''
+  settings.subagentDefaultEffort = 'low'
+  savedRoutes = undefined
+  assert.deepEqual([resolve().model, resolve().config.model_reasoning_effort], ['gpt-6.1-sol', 'low'])
 })
 test('backend switches independent tool and restores it without changing fork or custom tools', async () => {
   const spawn = entry('spawn'), fork = entry('fork'), custom = entry('spawn', { persona: 'custom' })
@@ -70,6 +156,36 @@ test('failed persistence restores tool configuration', async () => {
   const switcher = createSubagentBackendSwitcher({ entries: () => [spawn], prepare: async () => {}, persist: async () => { throw Error('disk') } })
   await assert.rejects(switcher.select('codex'), /disk/)
   assert.deepEqual(spawn.fiber.config, { provider: 'spawn' })
+})
+
+test('a saved Codex selection stays on Codex when its component needs repair instead of silently using DSH', async () => {
+  const spawn = entry('spawn')
+  const switcher = createSubagentBackendSwitcher({ entries: () => [spawn], prepare: async () => { throw Error('update required') } })
+  await assert.rejects(switcher.select('codex'), /update required/)
+  assert.equal(spawn.fiber.config.provider, 'spawn', 'a new invalid choice is refused')
+  await switcher.select('codex', { validate: false })
+  assert.equal(spawn.fiber.config.provider, SUBAGENT_PROVIDER, 'restoring a saved choice preserves its backend; start still validates the CLI')
+  await switcher.dispose()
+})
+
+test('the external-auth bridge rejects a server that ignores the selected model or reasoning effort', async () => {
+  const { authenticatedSubagentChild } = await import('../src/subagent-auth.js')
+  const { PassThrough } = await import('node:stream')
+  for (const returned of [{ model: 'different', reasoningEffort: 'high' }, { model: 'selected', reasoningEffort: 'low' }, { model: 'selected', reasoningEffort: 'high' }]) {
+    const transports = []
+    class Transport {
+      constructor() { transports.push(this) }
+      onRequest(handler) { this.handler = handler } onNotification() {} start() {} close() {}
+      async request(method) { return method === 'thread/start' ? returned : {} }
+    }
+    const child = { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), done: new Promise(() => {}) }
+    authenticatedSubagentChild(child, { Transport, getTokens: async () => ({}), thread: { model: 'selected', config: { model_reasoning_effort: 'high' } }, signal: new AbortController().signal })
+    await transports[0].handler('initialize', {})
+    const result = transports[0].handler('thread/start', {})
+    if (returned.model !== 'selected') await assert.rejects(result, /selected subtask model/)
+    else if (returned.reasoningEffort !== 'high') await assert.rejects(result, /selected subtask reasoning/)
+    else assert.deepEqual(await result, returned)
+  }
 })
 
 test('backend restoration preserves edits made while Codex is selected', async () => {

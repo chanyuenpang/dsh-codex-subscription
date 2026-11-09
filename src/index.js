@@ -5,12 +5,15 @@ import { createDefaultModelController } from './default-model.js'
 import { withDefaultReasoningEffort } from './default-reasoning-effort.js'
 import { DEFAULT_REASONING_EFFORT_FIELD, normalizeDefaultReasoningEffort } from './settings-contract.js'
 import { PREFERENCE_FIELDS, normalizeReasoningCache } from './preference-fields.js'
+import { createSubscriptionPreferencesTool } from './subscription-preferences-tool.js'
 import { createSubscriptionConnection } from './subscription-connection.js'
 import { createCompactionBridge } from './subscription-compaction.js'
 import { createReasoningBridge } from './subscription-reasoning.js'
 import { registerSubscriptionTransport } from './subscription-transport.js'
-import { createSubagentBackendSwitcher, createSubscriptionSubagent, loadSubagentRuntime, presetEntries } from './subagent-backend.js'
+import { createSubagentBackendSwitcher, createSubscriptionSubagent, loadSubagentRuntime, presetEntries, subagentConfigListener } from './subagent-backend.js'
+import { createSubagentDefaults, normalizeSubagentModel, normalizeSubagentEffort } from './subagent-defaults.js'
 import { inspectSubagentRuntime } from './subagent-runtime.js'
+import { createSubagentCli } from './subagent-cli.js'
 import { createRuntimeManagement } from './runtime-management.js'
 import { createSketchAgentBridge } from './sketch-agent-bridge.js'
 import { createSketchAgentTool } from './sketch-agent-tool.js'
@@ -21,9 +24,9 @@ import { readSubscriptionCredentials } from './subscription-credentials.js'
 import { USER_AGENT } from './version.js'
 import { createRemoteControl } from './remote-control.js'
 import { createDshRemoteControl } from './remote-control-dsh.js'
+import { createVoiceHangupClassifier } from './voice-hangup.js'
 import { createRemoteHistorySource } from './remote-history-source.js'
 import { createUltraExecutionPreset } from './ultra-execution.js'
-import { loadHostSessionSdk } from './host-session-sdk.js'
 import { createRemoteImageAssets } from './remote-image-assets.js'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import * as dshLlm from '@deepseek-ai/dsh-llm'
@@ -38,7 +41,7 @@ import { createCodexAuthService, DshOAuthCredentialStore } from './credential-st
 import { DshOAuthAccountVault } from './account-vault.js'
 import { openCodexAuthUrl } from './external-url.js'
 import { CodexLoginCoordinator, createCodexRpcHandler } from './login-coordinator.js'
-import { createCodexNetworkTransport } from './oauth-network.js'
+import { createCodexNetworkTransport, resolveCodexOAuthProxy } from './oauth-network.js'
 import { createModels, openaiCodexProvider, openaiCodexSubscriptionProvider } from './pi-ai-runtime.js'
 import { createOfficialModelCatalog, withModelCatalogReady } from './model-catalog.js'
 import { readCapabilitySettings, normalizeSearchDomains, CUSTOM_CONTEXT_OVERRIDES_FIELD, SEARCH_MODE_FIELD, SEARCH_MODES, SEARCH_DOMAINS_FIELD, QUOTA_ALERTS_FIELD, QUOTA_ALERT_MODES, QUOTA_THRESHOLD_FIELDS, MAX_CONTEXT_BUDGET } from './capability-settings.js'
@@ -102,9 +105,10 @@ export function createSearchProviderSwitcher(loader) {
       ? configured
       : DSH_SEARCH_PROVIDER_FALLBACK
   }
-  // Fiber.config holds resolved volatile references (readable with get()), never raw strings.
+  // Cordis 4.1 separates active validated config from raw input.
   const current = () => {
-    const value = webEntry()?.fiber?.config?.searchProvider
+    const fiber = webEntry()?.fiber
+    const value = (fiber?.effectiveConfig ?? fiber?.config)?.searchProvider
     return typeof value === 'string' ? value : value?.get?.()
   }
   const writeProvider = async provider => {
@@ -132,6 +136,7 @@ export function createSearchProviderSwitcher(loader) {
 const settingsFields = {
   [DISABLED_MODELS_FIELD]: z.transform(z.array(z.string()).max(100), normalizeDisabledModels).default([]),
   [AUTO_QUOTA_RETRY_FIELD]: z.boolean().default(DEFAULT_AUTO_QUOTA_RETRY),
+  subagentDefaultModel: z.transform(z.string().max(80), normalizeSubagentModel).default(''),
   ...Object.fromEntries(Object.entries(PREFERENCE_FIELDS).map(([field, rule]) => [field, rule.default === undefined ? z.union(rule.choices) : z.union(rule.choices).default(rule.default)])),
   imageModel: z.union(Object.keys(IMAGE_MODELS)).default(DEFAULT_IMAGE_MODEL),
   imageQuality: z.union(['auto','low','medium','high','xhigh','max']).default('auto'),
@@ -171,12 +176,12 @@ export function apply(ctx, config = {}) {
   const baseProvider = openaiCodexProvider()
   let resolveAuth = async () => undefined
   let subagentBackend
+  const subagentCli = createSubagentCli({ profile: () => ctx.get?.('profileContext') })
   const runtimeManagement = createRuntimeManagement({
-    manager: () => ctx.get?.('pluginManager'), inspect: inspectSubagentRuntime,
+    inspect: () => inspectSubagentRuntime(undefined, subagentCli), cli: subagentCli,
     active: () => subagentBackend?.activeCount() ?? 0,
     selectDsh: async () => { if (subagentBackend) await subagentBackend.select('dsh'); else await settings.update({ subagentBackend: 'dsh' }) },
   })
-  ctx.effect(() => ctx.on?.('plugin-manager/install-state', value => runtimeManagement.progress(value)))
   const modelCatalog = createOfficialModelCatalog({
     onUpdated: () => ctx.llm.emitAdaptersUpdated?.(),
     onCacheError: error => ctx.logger?.debug?.('could not access the Codex model catalog cache (%s)', error?.code ?? error?.name ?? 'unknown error'),
@@ -187,14 +192,29 @@ export function apply(ctx, config = {}) {
     fetch: (input, init) => network.fetch('catalog', input, init),
     retryDelaysMs: [5_000, 15_000, 30_000, 60_000, 120_000, 300_000],
   })
-  const appendUltraPolicy = loadHostSessionSdk()?.appendPluginRecord
+  const subagentCatalog = createOfficialModelCatalog({
+    subagent: true,
+    getAuth: options => resolveAuth(options),
+    readCredential: options => store.read(PROVIDER, options),
+    baseModels: () => baseProvider.getModels(),
+    fetch: (input, init) => network.fetch('catalog', input, init),
+  })
+  ctx.effect(() => () => subagentCatalog.clear())
+  const subagentDefaults = createSubagentDefaults({
+    readSettings: settings.get, catalog: subagentCatalog,
+    modelSelection: () => ctx.get?.('subagentModelSelection')?.current(),
+    projections: () => ctx.get?.('sessionProjections'),
+  })
   const ultra = createUltraExecutionPreset({
     catalog: modelCatalog,
     resolveAgent: () => ctx.get?.('agents')?.currentInitiator?.(),
     defaultEffort: () => settings.get()[DEFAULT_REASONING_EFFORT_FIELD],
-    record: appendUltraPolicy,
   })
-  ctx.effect(() => ultra.install(ctx), 'codex-subscription: Ultra execution preset')
+  ctx.inject(['systemPrompt'], scope => scope.effect(() => {
+    const dispose = ultra.install(scope)
+    ctx.llm.emitAdaptersUpdated?.()
+    return () => { dispose(); ctx.llm.emitAdaptersUpdated?.() }
+  }, 'codex-subscription: Ultra execution preset'))
   const connection = createSubscriptionConnection({ resolveMode: () => settings.get().connectionMode })
   // The settings surface edits DSH's own default model instead of keeping a
   // second copy, so every new conversation opens on what the user selected.
@@ -217,6 +237,7 @@ export function apply(ctx, config = {}) {
     unlimited: () => settings.get()[RETRY_POLICY_FIELD] === 'unlimited',
     accountScope,
     diagnostic: reason => diagnosticLog.info('model', `cache-preserving reasoning: ${reason}`),
+    lockDiagnostic: event => diagnosticLog[event.event === 'conflict' ? 'warn' : 'info']('model', 'reasoning checkpoint lock', JSON.stringify(event)),
   })
   ctx.on('session/created', session => reasoning.sessionCreated(session))
   ctx.on('session/disposed', session => reasoning.sessionDisposed(session))
@@ -242,6 +263,7 @@ export function apply(ctx, config = {}) {
     resolveReviewModel: () => settings.get().reviewModel,
     catalog: modelCatalog,
     runNetwork: network.run,
+    runOAuthRefresh: network.refreshOAuth,
     beginModelAttempt: network.beginModelAttempt,
   })
   let fetchRouted = false
@@ -260,8 +282,11 @@ export function apply(ctx, config = {}) {
         composerPredictions: settings.get().composerPredictions === 'on' ? 'on' : 'off',
         otherModels: settings.get().otherModels === 'off' ? 'off' : 'on',
         subagentBackend: settings.get().subagentBackend ?? 'dsh',
+        subagentDefaultModel: normalizeSubagentModel(settings.get().subagentDefaultModel),
+        subagentDefaultEffort: normalizeSubagentEffort(settings.get().subagentDefaultEffort),
+        subagentModels: subagentDefaults.list(),
         subagentBackendAvailable: subagentBackend !== undefined,
-        subagentRuntimeInstalled: inspectSubagentRuntime().installed,
+        subagentRuntimeInstalled: inspectSubagentRuntime(undefined, subagentCli).installed,
         ...readCapabilitySettings(settings.get()),
         [QUICK_QUOTA_MODE_FIELD]: normalizeQuickQuotaMode(
           settings.get()[QUICK_QUOTA_MODE_FIELD],
@@ -294,10 +319,14 @@ export function apply(ctx, config = {}) {
       }
     },
     update: async patch => {
+      if (patch.subagentDefaultModel && !subagentDefaults.list().some(model => model.id === patch.subagentDefaultModel)) {
+        throw new Error('Codex subtask model is unavailable or disallowed')
+      }
       if (patch[FETCH_PROVIDER_FIELD] === FETCH_PROVIDER_CODEX && !fetchRouted) throw new Error('This DSH version does not support Codex webpage reading')
       if (Object.hasOwn(patch, 'subagentBackend')) {
         if (!subagentBackend) throw new Error('DSH subagent services are unavailable')
         await subagentBackend.select(patch.subagentBackend)
+        if (patch.subagentBackend === 'codex') await subagentCatalog.refresh().catch(() => {})
       }
       const rest = { ...patch }
       delete rest.subagentBackend
@@ -349,9 +378,10 @@ export function apply(ctx, config = {}) {
     const instance = createSubscriptionSubagent({
       ctx: scoped, nativeHome: dshHomePath('state', 'codex-subscription', 'native-subagent'),
       resolveAuth, store,
-      refresh: credential => network.run('oauth', () => baseProvider.auth.oauth.refresh(credential)),
-      loadRuntime: loadSubagentRuntime,
+      refresh: provider.auth.oauth.refresh,
+      loadRuntime: () => loadSubagentRuntime({ cli: subagentCli }),
       maintenance: runtimeManagement.blocked,
+      defaults: subagentDefaults,
     })
     scoped.subagents.registerProvider(instance.provider)
     const switcher = createSubagentBackendSwitcher({
@@ -359,18 +389,18 @@ export function apply(ctx, config = {}) {
       persist: mode => settings.update({ subagentBackend: mode }),
     })
     // Web presets mount their scoped tool rows lazily, after the settings page.
-    const unconfigure = scoped.on('internal/config', function(_config, next) {
-      return switcher.configure(this, next())
-    }, { global: true })
+    const unconfigure = scoped.on('internal/config', subagentConfigListener(switcher), { global: true })
     let requested = 'dsh'
-    const select = async mode => {
+    const select = async (mode, options) => {
       requested = mode
-      try { await switcher.select(mode) } catch (error) { requested = settings.get().subagentBackend ?? 'dsh'; throw error }
+      try { await switcher.select(mode, options) } catch (error) { requested = settings.get().subagentBackend ?? 'dsh'; throw error }
     }
     subagentBackend = { select, activeCount: instance.activeCount }
     const sync = value => {
       const mode = value.subagentBackend ?? 'dsh'
-      if (mode !== requested) void select(mode).catch(() => scoped.logger.warn('Could not switch the subscription subagent backend'))
+      // A saved Codex choice must report a missing component on use, never
+      // silently run the task through DSH while an update is required.
+      if (mode !== requested) void select(mode, { validate: false }).catch(() => scoped.logger.warn('Could not switch the subscription subagent backend'))
     }
     void scoped.loader.await().then(() => sync(settings.get())).catch(() => scoped.logger.warn('Could not initialize the subscription subagent backend'))
     const unwatch = settings.watch(sync)
@@ -637,7 +667,16 @@ export function apply(ctx, config = {}) {
     trace: entry => { try { remoteControl.host.note(entry) } catch { /* diagnostics only */ } },
     userAgent: USER_AGENT,
     configFile: dshHomePath('state', 'codex-subscription', 'remote-config.json'),
-    voice: { WebSocket, fetch: (input, init) => network.fetch('remote', input, init), credentials: signal => readSubscriptionCredentials(resolveAuth, options => store.read(PROVIDER, { ...options, signal }), signal) },
+    voice: {
+      WebSocket,
+      resolveProxy: resolveCodexOAuthProxy,
+      fetch: (input, init) => network.fetch('voice', input, init),
+      credentials: signal => readSubscriptionCredentials(resolveAuth, options => store.read(PROVIDER, { ...options, signal }), signal),
+      classifyHangUp: createVoiceHangupClassifier({
+        stream: request => ctx.llm.stream(request), provider: PROVIDER,
+        model: () => ['gpt-5.6-luna', 'gpt-5.4-mini'].find(id => modelCatalog.getModels().some(model => model.id === id)) ?? 'gpt-5.6-luna',
+      }),
+    },
   })
   ctx.effect(() => () => remoteBridge.close())
   const remoteControl = createRemoteControl({
@@ -730,7 +769,7 @@ export function apply(ctx, config = {}) {
     const tracked = operation.finally(() => activeQuotaRetries.delete(tracked))
     activeQuotaRetries.add(tracked)
     return tracked
-  })
+  }, true)
   ctx.effect(() => async () => {
     disposeQuotaRetry()
     quotaRetryLifetime.abort(new Error('codex-subscription quota retry disposed'))
@@ -802,10 +841,11 @@ export function apply(ctx, config = {}) {
     nativeVoice,
     voicePreview,
     composerPredictions,
-    onAccountChanged: () => { connectorsClient.clear(); usageProfileReader.clear(); voicePreview.clear(); composerPredictions.clear(); quotaRetryHandler.notifyAccountChanged() },
+    onAccountChanged: () => { subagentCatalog.clear(); connectorsClient.clear(); usageProfileReader.clear(); voicePreview.clear(); composerPredictions.clear(); quotaRetryHandler.notifyAccountChanged() },
     diagnosticsReader: () => createSubscriptionDiagnostics({ auth, preferences, login: coordinator.supportState(), network, modelCatalog, connection, compaction, review: provider, operations: diagnosticOperations, runtimeManagement, storage: () => usageReader.storage(), tools: ctx.tools }),
     onCleanupFailure: () => diagnosticOperations.record('account/cleanup', 'failed'),
     modelCatalog,
+    subagentCatalog,
     closeConnections: () => connection.dispose(),
     originalImages,
     resolveInheritedOriginal: (sessionId, assetId) => inheritedOriginalImageRef(
@@ -815,6 +855,9 @@ export function apply(ctx, config = {}) {
   })
 
   const handler=diagnosticOperations.wrap((endpoint,payload,signal)=>endpoint.startsWith('sketch/')?sketchBridge.rpc(endpoint,payload):subscriptionHandler(endpoint,payload,signal))
+
+  ctx.effect(() => ctx.tools.register(createSubscriptionPreferencesTool(handler, () => ctx.get?.('approval'))),
+    'codex-subscription: response preferences tool')
 
   ctx.inject(['connection'], connectionContext => connectionContext.effect(
     () => registerSubscriptionTransport(connectionContext.connection, handler),

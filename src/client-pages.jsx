@@ -1,5 +1,6 @@
+import { useId } from 'react'
 import { Hint, SettingsLabel } from './client-hint.jsx'
-import { Switch, IconChevronRightOutline14 } from './client-primitives.js'
+import { Switch, IconChevronRightOutline14 } from './client-primitives.jsx'
 import { usePreferenceSnapshot } from './client-shared.js'
 import { CapabilityPreferences } from './capability-preferences.jsx'
 import { DefaultModelPreference } from './default-model-preferences.jsx'
@@ -15,7 +16,7 @@ import {
   PickerModelsPreference, QuickQuotaPreference, ReasoningCachePreference, ReasoningSummaryPreference, RetryPolicyPreference, SearchProviderPreference,
   StreamIdleTimeoutPreference,
 } from './client-preferences.jsx'
-import { OUTPUT_VERBOSITY_DEFAULT, OUTPUT_VERBOSITY_FIELD, OUTPUT_VERBOSITY_HIGH, OUTPUT_VERBOSITY_LOW, OUTPUT_VERBOSITY_MEDIUM, QUICK_QUOTA_MODE_OFF } from './settings-contract.js'
+import { OUTPUT_VERBOSITY_DEFAULT, OUTPUT_VERBOSITY_FIELD, OUTPUT_VERBOSITY_HIGH, OUTPUT_VERBOSITY_LOW, OUTPUT_VERBOSITY_MEDIUM, QUICK_QUOTA_MODE_OFF, SPEED_MODE_FIELD, SPEED_MODE_FAST, SPEED_MODE_STANDARD, SPEED_MODE_ULTRAFAST } from './settings-contract.js'
 import { IMAGE_MODELS } from './image-models.js'
 import { ImageChoice } from './image-preferences.jsx'
 
@@ -85,6 +86,7 @@ export function QuotaSettingsCard({ preference, t }) {
 }
 
 function OutputVerbosityPreference({ preference, t }) {
+  const radioId = useId()
   const snapshot = usePreferenceSnapshot(preference)
   const writable = ready(snapshot)
   const values = [OUTPUT_VERBOSITY_DEFAULT, OUTPUT_VERBOSITY_LOW, OUTPUT_VERBOSITY_MEDIUM, OUTPUT_VERBOSITY_HIGH]
@@ -92,14 +94,29 @@ function OutputVerbosityPreference({ preference, t }) {
   return <div className="codexSubscriptionPreference">
     <div className="codexSubscriptionPreferenceCopy"><SettingsLabel description={t('verbosityPageHint')}>{t('verbosityTitle')}</SettingsLabel></div>
     <div className="codexSubscriptionQuotaModes" role="radiogroup" aria-label={t('verbosityTitle')} aria-busy={snapshot.saving || undefined}>
-      {values.map(value => <label key={value} className="codexSubscriptionQuotaMode"><input type="radio" name="codex-output-verbosity" checked={snapshot.outputVerbosity === value} disabled={!writable} onChange={() => { void preference.set({ [OUTPUT_VERBOSITY_FIELD]: value }) }} /><span>{t(label[value])}</span></label>)}
+      {values.map(value => <label key={value} className="codexSubscriptionQuotaMode"><input type="radio" name={`${radioId}-codex-output-verbosity`} checked={snapshot.outputVerbosity === value} disabled={!writable} onChange={() => { void preference.set({ [OUTPUT_VERBOSITY_FIELD]: value }) }} /><span>{t(label[value])}</span></label>)}
     </div>
   </div>
 }
 
 function Radios({ snapshot, preference, field, values, label, name, text, disabled, disabledValues = [] }) {
+  const radioId = useId()
   return <div className="codexSubscriptionQuotaModes" role="radiogroup" aria-label={label} aria-busy={snapshot.saving || undefined}>
-    {values.map(value => <label key={value} className="codexSubscriptionQuotaMode"><input type="radio" name={name} checked={snapshot[field] === value} disabled={disabled || !snapshot.writable || disabledValues.includes(value)} onChange={() => { void preference.set({ [field]: value }) }} /><span>{text(value)}</span></label>)}
+    {values.map(value => <label key={value} className="codexSubscriptionQuotaMode"><input type="radio" name={`${radioId}-${name}`} checked={snapshot[field] === value} disabled={disabled || !snapshot.writable || disabledValues.includes(value)} onChange={() => { void preference.set({ [field]: value }) }} /><span>{text(value)}</span></label>)}
+  </div>
+}
+
+function SpeedPreference({ snapshot, preference, t }) {
+  const ultrafast = snapshot.ultrafastModels.length > 0
+  const values = [SPEED_MODE_STANDARD, SPEED_MODE_FAST]
+  if (ultrafast || snapshot.speedMode === SPEED_MODE_ULTRAFAST) values.push(SPEED_MODE_ULTRAFAST)
+  const labels = { [SPEED_MODE_STANDARD]: 'speedStandard', [SPEED_MODE_FAST]: 'speedFast', [SPEED_MODE_ULTRAFAST]: 'speedUltrafast' }
+  return <div className="codexSubscriptionPreference">
+    <div className="codexSubscriptionPreferenceCopy"><SettingsLabel description={ultrafast
+      ? `${t('speedFastHint')} · ${t('speedUltrafastHint')}` : t('speedFastHint')}>{t('speedTitle')}</SettingsLabel></div>
+    <Radios snapshot={snapshot} preference={preference} field={SPEED_MODE_FIELD} values={values}
+      name="codex-speed" label={t('speedTitle')} text={value => t(labels[value])}
+      disabledValues={ultrafast ? [] : [SPEED_MODE_ULTRAFAST]} />
   </div>
 }
 
@@ -110,6 +127,7 @@ export function ModelsPage({ preference, t, defaultModel }) {
       <ModelCatalogStatus preference={preference} t={t} title={t('modelsSectionTitle')} />
       {defaultModel === undefined ? null : <><DefaultModelPreference preference={preference} defaultModel={defaultModel} t={t} /><div className="codexSubscriptionDivider" /></>}
       <DefaultReasoningEffortPreference preference={preference} t={t} />
+      <SpeedPreference snapshot={snapshot} preference={preference} t={t} />
       <ComposerPredictionPreference preference={preference} t={t} />
       <PickerModelsPreference preference={preference} t={t} />
     </section>
@@ -148,7 +166,31 @@ export function ModelsPage({ preference, t, defaultModel }) {
   </div>
 }
 
-export function ToolsPage({ preference, rpc, t, active = true }) {
+function SubagentDefaultPreferences({ preference, snapshot, t }) {
+  const models = snapshot.subagentModels ?? []
+  const model = snapshot.subagentDefaultModel ?? ''
+  const effort = snapshot.subagentDefaultEffort ?? 'auto'
+  const selected = models.find(candidate => candidate.id === model)
+  const efforts = model === '' ? [...new Set(models.flatMap(candidate => candidate.efforts))] : selected?.efforts ?? []
+  const inherit = '__follow_parent__'
+  const modelItems = [{ id: inherit, label: t('subagentFollowParent') }, ...models.map(candidate => ({ id: candidate.id, label: candidate.name ?? candidate.id }))]
+  const effortText = id => id === 'auto' ? t(model === '' ? 'subagentFollowParent' : 'subagentModelEffort') : t(`defaultReasoningEffort_${id}`)
+  const disabled = !ready(snapshot)
+  return <>
+    <ImageChoice t={t} label={t('subagentDefaultModel')} hint={t('subagentDefaultHint')}
+      value={model || inherit} text={model === '' ? t('subagentFollowParent') : selected?.name ?? model}
+      items={modelItems} disabled={disabled} onSelect={id => {
+        const target = models.find(candidate => candidate.id === id)
+        void preference.set({ subagentDefaultModel: id === inherit ? '' : id, ...(target && !target.efforts.includes(effort) ? { subagentDefaultEffort: 'auto' } : {}) })
+      }} />
+    <ImageChoice t={t} label={t('subagentDefaultEffort')} value={effort} text={effortText(effort)}
+      items={['auto', ...efforts].map(id => ({ id, label: effortText(id) }))}
+      disabled={disabled} onSelect={id => { void preference.set({ subagentDefaultEffort: id }) }} />
+    {model !== '' && !selected ? <Hint>{t('subagentDefaultUnavailable')}</Hint> : null}
+  </>
+}
+
+export function ToolsPage({ preference, rpc, t, active = true, openSubagentBundle }) {
   const snapshot = usePreferenceSnapshot(preference)
   const writable = ready(snapshot)
   const others = snapshot.otherModels !== 'off'
@@ -166,13 +208,13 @@ export function ToolsPage({ preference, rpc, t, active = true }) {
       <ConnectorsPreference preference={preference} t={t} />
     </section>
     <section className="codexSubscriptionCard codexSubscriptionPreferencesCard" aria-label={t('subagentBackendTitle')}>
-      
       <div className="codexSubscriptionPreference">
-        <div className="codexSubscriptionPreferenceCopy"><SettingsLabel description={t('subagentBackendHint')}>{t('subagentBackendTitle')} <small>Beta</small></SettingsLabel>{!snapshot.subagentBackendAvailable || !(codexReady || subagentsOn) ? <Hint>{t(snapshot.subagentBackendAvailable ? 'subagentBackendNeedsRuntime' : 'subagentBackendUnavailable')}</Hint> : null}</div>
+        <div className="codexSubscriptionPreferenceCopy"><SettingsLabel description={t('subagentBackendHint')}>{t('subagentBackendTitle')} <small>Beta</small></SettingsLabel>{!snapshot.subagentBackendAvailable ? <Hint>{t('subagentBackendUnavailable')}</Hint> : null}</div>
         <Radios snapshot={snapshot} preference={preference} field="subagentBackend" values={['dsh', 'codex']} name="codex-subagent-backend" label={t('subagentBackendTitle')} text={value => t(`subagentBackend_${value}`)}
           disabled={!snapshot.subagentBackendAvailable} disabledValues={codexReady || subagentsOn ? [] : ['codex']} />
       </div>
-      <RuntimeManagement rpc={rpc} preference={preference} t={t} active={active} />
+      {subagentsOn ? <SubagentDefaultPreferences preference={preference} snapshot={snapshot} t={t} /> : null}
+      {snapshot.subagentBackendAvailable ? <RuntimeManagement rpc={rpc} preference={preference} t={t} active={active} openSubagentBundle={openSubagentBundle} /> : null}
     </section>
   </div>
 }

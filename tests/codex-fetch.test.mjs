@@ -63,7 +63,7 @@ test('HTTP, malformed JSON, network and timeout failures are sanitized and never
   for (const status of [401, 403, 404, 429, 503]) {
     let calls = 0
     await assert.rejects(setup({ fetch: async () => { calls += 1; return new Response('private-server-error', { status }) } }).fetch({ url: target }), error =>
-      error.code === (status === 401 || status === 403 ? 'WEB_PROVIDER_CREDENTIAL_MISSING' : 'WEB_PROVIDER_ERROR') && !error.message.includes('private'))
+      error.code === (status === 401 ? 'WEB_PROVIDER_CREDENTIAL_MISSING' : 'WEB_PROVIDER_ERROR') && !error.message.includes('private'))
     assert.equal(calls, status === 503 ? 2 : 1)
   }
   await assert.rejects(setup({ fetch: async () => new Response('{private') }).fetch({ url: target }), error => error.code === 'WEB_PROVIDER_ERROR' && !error.message.includes('private'))
@@ -220,6 +220,8 @@ test('configured id honors the native constructor env snapshot and never resurre
   assert.deepEqual(await WebRuntime.prototype.fetch.call(host, { url: target }), { codex: true })
   const old = { fiber: { config: { fetchProvider: { get: () => undefined } } }, options: { id: 'web', config: { fetchProvider: 'stale-raw' } } }
   assert.equal(configuredFetchProviderId({ fetchProviderEnv: 'original-env' }, [old], 'later-env'), 'original-env')
+  old.fiber.effectiveConfig = { fetchProvider: { get: () => 'active-provider' } }
+  assert.equal(configuredFetchProviderId({ fetchProviderEnv: 'original-env' }, [old]), 'active-provider')
 })
 
 test('old native constructor id overrides later raw config and ambient env, including an absent id', async () => {

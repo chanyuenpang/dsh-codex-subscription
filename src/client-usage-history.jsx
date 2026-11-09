@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { recoveryCall } from './client-recovery.js'
-import { fill } from './client-shared.js'
+import { accessFailureText, fill } from './client-shared.js'
 import { historyPeriodKey, reportedHistoryPeriods, selectHistoryPeriod } from './history-pending.js'
 import { uiLocale } from './client-usage-overview.jsx'
 
@@ -11,7 +11,7 @@ const LABELS = new Map([
   ['composer', 'historyComposer'], ['automation', 'historyAutomation'],
 ])
 const day = value => new Date(value).toLocaleDateString(uiLocale(), { month: 'numeric', day: 'numeric' })
-const amount = value => (value > 0 && value < 0.1 ? '<0.1' : (value >= 10 ? Math.round(value) : Math.round(value * 10) / 10).toLocaleString(uiLocale()))
+const amount = value => value > 0 && value < 0.1 ? `<${(0.1).toLocaleString(uiLocale())}` : (value >= 10 ? Math.round(value) : Math.round(value * 10) / 10).toLocaleString(uiLocale())
 const labelOf = (dimension, key, t) => (dimension === 'model' ? key : LABELS.has(key) ? t(LABELS.get(key)) : key.replaceAll('_', ' '))
 
 function Rows({ dimension, rows, total, t }) {
@@ -58,7 +58,7 @@ export function UsageHistory({ rpc, t, signedIn, resetKey, refreshKey, forceRefr
     <button className="codexSubscriptionHistoryRefresh" type="button" disabled={state.status === 'loading'} onClick={() => load(true)}>{t('historyRefresh')}</button>
     <div aria-live="polite">
       {state.status === 'loading' ? <p className="codexSubscriptionEmpty" role="status">{t('historyLoading')}</p> : null}
-      {state.status === 'error' ? <p className="codexSubscriptionError" role="alert">{state.message}</p> : null}
+      {state.status === 'error' ? <p className="codexSubscriptionError" role="alert">{accessFailureText(state.message, t)}</p> : null}
     </div>
       <div className="codexSubscriptionHistoryPeriods" role="group" aria-label={t('historyPeriods')}>
         {periods.map(item => <button type="button" key={historyPeriodKey(item)} aria-pressed={item === period} onClick={() => setSelected(historyPeriodKey(item))}>{`${day(item.startsAt)}–${day(item.endsAt)}`}</button>)}

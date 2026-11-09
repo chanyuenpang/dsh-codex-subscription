@@ -10,9 +10,11 @@ Use DSH’s native message queue: messages sent during generation can wait for t
 
 ### Voice conversations (Beta)
 
-Enable voice conversations, then use the voice button while the composer is empty. Speaking during playback pauses the current speech so you can continue talking; it does not cancel the DSH task.
+Enable voice conversations, then use the voice button while the composer is empty. You can speak while the assistant is talking. The voice conversation can change direction while the DSH task keeps running.
 
-When DSH asks a question, the voice reads the question and numbered options. Say “the second option” or the full option label to submit. Questions in a batch are answered one at a time; questions without options accept spoken text. Unclear choices are read again. Ending voice returns unanswered questions to the DSH interface.
+When DSH needs you to choose or confirm, use the question card in the chat. Spoken numbers or labels do not submit a choice. If DSH replaces the composer with the question card, you can resume voice in the same chat after answering. Free-text questions can still be answered aloud.
+
+On Desktop, DSH posts background results in chat while the voice conversation continues. Ask about the result whenever you want to discuss it.
 
 Choosing a voice or changing the answer language plays a sample in that language. “Same as you speak” uses an English preview while the conversation still follows your spoken language. Voices without a sample are marked unavailable.
 
@@ -52,7 +54,7 @@ Spark keeps its independent quota. The plugin does not invent five-hour limits, 
 Set **ChatGPT connectors** under Web & tools to Read-only, Write after asking or Write directly, and every DSH model (DeepSeek included) gains three tools: `chatgpt_connectors_search` finds tools in the apps you connected in ChatGPT, `chatgpt_connectors_describe` shows their arguments, and `chatgpt_connectors_call` runs one. Apps such as GitHub, Gmail, Google Drive and Google Calendar work as far as your account has them connected.
 
 - **Read-only** runs only tools the app marks read-only (search mail, read files, look up pull requests).
-- **Write after asking** asks for your approval on every call that changes data (send mail, edit files, comment), showing the tool, arguments and description; with phone remote control on, the approval also appears on the phone. A refused call sends nothing.
+- **Write after asking** requires DSH approval before changing data. If no prompt appears, open the current session's permission menu in the composer or run `/permission`. On the standard DSH profile, **Workspace Write** allows prompts and **Full access** disables them. A change runs only after approval.
 - **Write directly** runs the same changing calls immediately with no approval; a mistake cannot be undone. Use it only when you trust the model and the task.
 - What an app returns is third-party content and models are told not to follow instructions inside it. Account, safety and plugin-management tools of ChatGPT are not exposed.
 - Connect the apps in ChatGPT first. Off by default; the tool list is cached for 10 minutes.
@@ -95,7 +97,7 @@ Use the composer pen button for manual drawing. Selecting `@sketch` only inserts
 
 Sketch supports local drafts, image layers, aspect ratios, three brushes (solid ink, grainy pencil and translucent highlighter), lines and shapes, two erasers, undo/redo, pan/zoom and configurable shortcuts. Smoothing processes a completed stroke only after release. Up to 20 drafts stay in the current browser; attaching a sketch never sends it automatically. Its image panel manages only the current sketch, not the conversation library.
 
-The board supports editable shapes and text, native curves, and a side control for size/opacity. During Agent drawing, you can view, zoom, close the panel or stop drawing; manual edits unlock when it finishes. Automatic completion previews are off by default and can be enabled under Images & sketch. The document, history and run state are retained when switching away and back. Background drawing while viewing another session is not guaranteed. Save before a full-page reload or exit; unsaved recovery is not guaranteed.
+The board supports editable shapes and text, native curves, and a side control for size/opacity. During Agent drawing, you can view, zoom, close the panel or stop drawing; manual edits unlock when it finishes. Automatic completion previews are off by default and can be enabled under Images & sketch. Drawing continues when you switch conversations, and multiple conversations can draw independently. Each board keeps its document, history and run state when you return. Save your draft before a full-page reload or exit.
 
 **Sketch to image**: draw, click Attach, describe the desired result in the composer, then send; the sketch is the reference image and the composition is kept.
 
@@ -113,13 +115,11 @@ If you undo or clear an accepted draft without sending, the empty composer shows
 
 [OpenAI states](https://learn.chatgpt.com/docs/features/composer-predictions) that generating predictions in official Codex does not count toward usage limits or consume credits; sending an accepted prediction is metered normally. DSH makes additional prediction requests, and the same exemption for this third-party integration is unconfirmed, so the plugin does not promise free predictions. Predictions neither retrieve other conversations nor run tools.
 
-### Composer speed
+### Codex speed
 
-With a supported Codex model selected, open the composer's model menu to choose Standard or Fast.
-Standard adds no icon; only Fast shows a lightning icon before the model name. Spark does not show the speed entry. Fast mode increases speed and uses more Credits;
-see the [OpenAI Codex Speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed) for the current rules.
+Choose speed under **Settings → Codex subscription → Models**. Output verbosity is on the same page. Speed settings apply when the selected Codex model supports the tier. Fast mode increases speed and uses more Credits. For current rules, see the [OpenAI Codex Speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed) for the current rules.
 
-**Ultrafast (Beta).** A model's speed menu gains "Ultrafast" only when the current account's catalog lists an `ultrafast` tier for that model (at the developer event: GPT-6 Astra on Pro 500 only). If you chose Ultrafast and switch to a model without it, requests go out on the standard tier; the plugin never substitutes Fast for you. It is the fastest tier and uses allowance and Credits faster. It stays Beta because it has not been run on a Pro 500 account yet.
+**Ultrafast (Beta).** The speed setting offers “Ultrafast” only when the current account's catalog lists an `ultrafast` tier for that model (at the developer event: GPT-6 Astra on Pro 500 only). If you chose Ultrafast and switch to a model without it, requests go out on the standard tier; the plugin never substitutes Fast for you. It is the fastest tier and uses allowance and Credits faster. It stays Beta because it has not been run on a Pro 500 account yet.
 
 ### Ultra proactive delegation
 
@@ -156,7 +156,7 @@ Opt in under **Models → Advanced**. SSE and DSH subtasks remain the defaults:
 - Set **Input image detail** under **Settings → Codex subscription → Models**. It defaults to Auto; higher detail uses more input tokens.
 - Set **Stream inactivity timeout** in the same area (default: 10 minutes). It limits time without streamed data, not the overall response duration; lower values may interrupt slow but valid reasoning and hand the request to DSH retry handling.
 - **WebSocket** reuses connections and eligible context transfers. Failed handshakes can fall back to SSE; interrupted responses surface an error without automatic replay. Applies to the next request, does not expand context limits, and is not guaranteed to be faster.
-- **Codex independent subtasks** reuse your subscription login and the official DSH Codex runtime, without a separate login; install its optional component in settings. They inherit the current subscription model and workspace permissions by default. Turn on model selection under Plugins → Subagent, tick the allowed models and start a new session to specify the child model and reasoning effort in chat. Non-subscription sessions must explicitly select a subscription model. Shared-context subtasks remain with DSH. A Codex subtask gets the workspace tools only: the apps connected to your ChatGPT account (calendar, site deploys and so on), plugin installs and browser or computer control are switched off, because the subtask runs with automatic approval.
+- **Codex independent subtasks** reuse your subscription login and the official DSH Codex provider. Prepare the optional runtime as described below. Subtasks inherit the current subscription model and workspace permissions by default. Turn on model selection under Plugins → Subagent, tick the allowed models and start a new session to specify the child model and reasoning effort in chat. Non-subscription sessions must explicitly select a subscription model. Shared-context subtasks remain with DSH. A Codex subtask gets the workspace tools only: the apps connected to your ChatGPT account (calendar, site deploys and so on), plugin installs and browser or computer control are switched off, because the subtask runs with automatic approval.
 
 <a id="codex-subtask-runtime"></a>
 
@@ -166,31 +166,32 @@ Opt in under **Models → Advanced**. SSE and DSH subtasks remain the defaults:
 
 Subscription chat, images, and native DSH subtasks do not need Codex CLI. Only **Codex independent subtasks (Beta)** require the optional official runtime. The plugin never downloads it in the background.
 
-In **Settings → Codex subscription → Web & tools → Subtasks**, click **Install component**. DSH handles installation; the page shows its stage and offers cancellation before applying. Restart after completion, then choose Codex. Installation does not enable subtasks automatically.
+Install **Codex Subagent** from the official entries in DSH's **Plugins** page. If you only use it with your subscription, switch the official entry off after installation to leave the package installed and its standalone tool disabled.
 
-Prefer **Install component** above. The plugin selects a component matching the current DSH version: DSH `0.2.0-rc.2` installs component `0.2.0-rc.2`, while DSH `0.1.5-rc.2` installs component `0.1.5-rc.2`. An existing `0.1.5-rc.3` component is recognized only on a matching host. Do not omit the component version or substitute `@next`.
+In **Settings → Codex subscription → Web & tools**, click **Prepare CLI** under **Independent subtasks**, restart DSH, then choose **Codex (subscription)**. The dedicated CLI uses the profile dependency alias `dsh-codex-subtask-cli` and keeps your subscription login and saved child defaults.
 
-### Manual installation on older hosts and offline preparation
+On Windows, the dedicated CLI prefers Codex's MXC sandbox when supported by the device and policy. Otherwise it needs Codex's configured legacy Windows sandbox. Subtasks retain the DSH session's file policy; the plugin does not fall back to unrestricted execution when sandbox setup is unavailable.
 
-Enter a component version matching the current DSH version in the plugin installer. As a pinned-version example, for DSH `0.2.0-rc.2`, enter `@deepseek-ai/dsh-subagent-codex@0.2.0-rc.2`, or run:
+### Manual installation and offline preparation
+
+Use the same profile as the subscription plugin. For DSH `0.2.2-rc.1`, the exact-version terminal commands are below. On another supported host, replace only the DSH adapter version with that host's version; do not substitute `@next`.
 
 ```sh
-dsh plugin --profile web add @deepseek-ai/dsh-subagent-codex@0.2.0-rc.2
+dsh plugin --profile web add @deepseek-ai/dsh-subagent-codex@0.2.2-rc.1
+dsh plugin --profile web add dsh-codex-subtask-cli@npm:@openai/codex@0.167.0 --save-exact --ignore-scripts
 ```
 
-Use the same profile as the subscription plugin and restart afterwards. Offline preparation requires a complete runtime installed and verified on the target OS and architecture; copying only the subscription plugin or Codex launcher is insufficient. Model requests still need connectivity.
+The CLI alias is a plain dependency, not a plugin to enable. Restart afterwards. Offline preparation requires a complete runtime installed and verified on the target OS and architecture; copying only the subscription plugin or Codex launcher is insufficient. Model requests still need connectivity.
 
 ### When you no longer need it
 
-To disable it, switch back to **DSH** in Advanced settings. The component stays installed so you can enable it again later.
-
-To uninstall it, click **Uninstall component** in the same section and confirm. The plugin blocks removal while Codex subtasks are running, switches back to DSH, and uses the official uninstall interface. Restart after completion. On older hosts, run this in a terminal, replacing `web` with the profile where you installed it:
+To stop using the subscription for subtasks, choose **DSH** under **Independent subtasks**. After any running child finishes, remove **Codex Subagent** from DSH's Plugins page if you no longer use it. To remove the subscription-only CLI as well, run the command below with the corresponding profile, then restart DSH.
 
 ```sh
-dsh plugin --profile web remove @deepseek-ai/dsh-subagent-codex
+dsh plugin --profile web remove dsh-codex-subtask-cli
 ```
 
-This removes the optional subtask component, not the subscription plugin. Subscription chat, image generation and native DSH subtasks are unaffected. The package manager may keep the component if another plugin still depends on it.
+Subscription chat, image generation and native DSH subtasks work without these optional components.
 
 ### Storage and cleanup
 

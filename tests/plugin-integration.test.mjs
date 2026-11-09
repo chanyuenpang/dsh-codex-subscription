@@ -3,6 +3,28 @@ import { runtimeVersions } from '../src/pi-ai-compat.js'
 import { RPC_ENDPOINTS } from '../src/rpc-contract.js'
 import { IMAGE_FEATURE_DEFAULTS } from '../src/image-features.js'
 import test from 'node:test'
+
+test('quota sign-in polling does not repeatedly fetch an available catalog, and explicit refresh still works', async () => {
+  const { createSubscriptionRpcHandler } = await import('../src/subscription-rpc.js')
+  let state = { source: 'online', refresh: 'ok' }, reads = 0
+  const catalog = { status: () => state, async refresh() { reads++; state = { ...state, refresh: 'refreshing' } } }
+  const handler = createSubscriptionRpcHandler({
+    authHandler: async () => ({ ok: true, value: { authenticated: true } }),
+    modelCatalog: catalog, preferences: { status: () => ({}) },
+  })
+  const signal = new AbortController().signal
+  for (let n = 0; n < 3; n++) await handler('status', {}, signal)
+  assert.equal(reads, 0)
+  state = { source: 'unavailable', refresh: 'idle' }
+  await handler('status', {}, signal)
+  await handler('status', {}, signal)
+  assert.equal(reads, 1)
+  state = { source: 'cached', refresh: 'failed' }
+  await handler('status', {}, signal)
+  assert.equal(reads, 1)
+  assert.equal((await handler('preferences/models', {}, signal)).ok, true)
+  assert.equal(reads, 2)
+})
 import Schema from '@deepseek-ai/schemastery'
 
 test('settings schema survives the native browser JSON round trip', () => {
@@ -287,7 +309,7 @@ test('account routes register without directly accessing the web server', () => 
   const host = fakeContext({ webServer: false })
   assert.doesNotThrow(() => applyPlugin(host.ctx, host.config))
   assert.equal(host.handled.length, RPC_ENDPOINTS.length)
-  assert.equal(host.tools.length, 1)
+  assert.deepEqual(host.tools.map(tool => tool.name).sort(), ['codex_image_generate', 'codex_subscription_preferences'])
 })
 
 test('optional Codex fetch reports live routing support, fails closed signed out, and unload restores the native registry', async () => {
@@ -419,7 +441,7 @@ test('plugin registers one Codex route, subscription image tool, and DSH-trusted
   assert.ok(profile.modelErrors instanceof Map, 'the host adapter reads model diagnostics from the profile on resolution')
   assert.equal(profile.modelErrors.get('gpt-5.5'), undefined, 'a serviceable model records no diagnostic')
   assert.deepEqual(host.searchProviders.map(provider => provider.id), ['codex-subscription', 'codex-subscription-dsh', 'codex-subscription-auto'])
-  assert.deepEqual(host.tools.map(tool => tool.name), ['codex_image_generate'])
+  assert.deepEqual(host.tools.map(tool => tool.name).sort(), ['codex_image_generate', 'codex_subscription_preferences'])
   assert.equal(host.listeners.filter(listener => listener.event === 'agent/request-error').length, 1)
   assert.equal(host.registered[0].adapter.providerRetryPolicy(), undefined)
   const models = await host.registered[0].adapter.listModels('openai-codex')
@@ -500,7 +522,7 @@ test('plugin registers one Codex route, subscription image tool, and DSH-trusted
   assert.equal(typeof preferenceStatus.value.subagentRuntimeInstalled, 'boolean')
   assert.deepEqual(preferenceStatus, {
     ok: true,
-    value: { disabledModels: [], autoQuotaRetry: false, compactionMode: 'dsh', reasoningCache: 'on', defaultReasoningEffort: 'auto', connectionMode: 'sse', connectors: 'off', reviewModel: 'session', remoteControl: 'off', composerPredictions: 'off', otherModels: 'on', subagentBackend: 'dsh', subagentBackendAvailable: false, subagentRuntimeInstalled: preferenceStatus.value.subagentRuntimeInstalled, ...IMAGE_FEATURE_DEFAULTS, reasoningSummary: 'auto', voiceCall: 'off', voiceVoice: 'cove', voiceLanguage: 'auto', retryPolicy: 'default', imageModel: 'gpt-image-2', imageQuality: 'auto', quickQuotaMode: QUICK_QUOTA_MODE_PERCENT, searchProvider: 'codex', fetchProvider: 'dsh', fetchRoutingAvailable: true, speedMode: SPEED_MODE_STANDARD, outputVerbosity: OUTPUT_VERBOSITY_DEFAULT, inputImageDetail: 'auto', streamIdleTimeoutMinutes: 10, contextMode: CONTEXT_MODE_STANDARD, customContextWindow: 272_000, customContextGpt54: 1_000_000, customContextGpt54Mini: 400_000, customContextGpt55: 272_000, customContextGpt56: 872_000, customContextGpt6Astra: 272_000, contextModels: activeContextModels, availableModels: preferenceStatus.value.availableModels, verbosityModels, fastModels: preferenceStatus.value.fastModels, ultrafastModels: preferenceStatus.value.ultrafastModels, ultraModels: preferenceStatus.value.ultraModels, catalogStatus: preferenceStatus.value.catalogStatus, customContextModels: {}, searchMode: 'live', searchDomains: [], quotaAlerts: 'important', quotaShortThreshold: 20, quotaLongThreshold: 20, writable: true },
+    value: { disabledModels: [], autoQuotaRetry: false, compactionMode: 'dsh', reasoningCache: 'on', defaultReasoningEffort: 'auto', connectionMode: 'sse', connectors: 'off', reviewModel: 'session', remoteControl: 'off', composerPredictions: 'off', otherModels: 'on', subagentBackend: 'dsh', subagentDefaultModel: '', subagentDefaultEffort: 'auto', subagentModels: [], subagentBackendAvailable: false, subagentRuntimeInstalled: preferenceStatus.value.subagentRuntimeInstalled, ...IMAGE_FEATURE_DEFAULTS, reasoningSummary: 'auto', voiceCall: 'off', voiceVoice: 'cove', voiceLanguage: 'auto', retryPolicy: 'default', imageModel: 'gpt-image-2', imageQuality: 'auto', quickQuotaMode: QUICK_QUOTA_MODE_PERCENT, searchProvider: 'codex', fetchProvider: 'dsh', fetchRoutingAvailable: true, speedMode: SPEED_MODE_STANDARD, outputVerbosity: OUTPUT_VERBOSITY_DEFAULT, inputImageDetail: 'auto', streamIdleTimeoutMinutes: 10, contextMode: CONTEXT_MODE_STANDARD, customContextWindow: 272_000, customContextGpt54: 1_000_000, customContextGpt54Mini: 400_000, customContextGpt55: 272_000, customContextGpt56: 872_000, customContextGpt6Astra: 272_000, contextModels: activeContextModels, availableModels: preferenceStatus.value.availableModels, verbosityModels, fastModels: preferenceStatus.value.fastModels, ultrafastModels: preferenceStatus.value.ultrafastModels, ultraModels: preferenceStatus.value.ultraModels, catalogStatus: preferenceStatus.value.catalogStatus, customContextModels: {}, searchMode: 'live', searchDomains: [], quotaAlerts: 'important', quotaShortThreshold: 20, quotaLongThreshold: 20, writable: true },
   })
   const preferenceUpdate = await host.request('preferences/update', {
     [AUTO_QUOTA_RETRY_FIELD]: false,
@@ -515,7 +537,7 @@ test('plugin registers one Codex route, subscription image tool, and DSH-trusted
   }, signal)
   assert.deepEqual(preferenceUpdate, {
     ok: true,
-    value: { disabledModels: [], autoQuotaRetry: false, compactionMode: 'dsh', reasoningCache: 'on', defaultReasoningEffort: 'auto', connectionMode: 'sse', connectors: 'off', reviewModel: 'session', remoteControl: 'off', composerPredictions: 'off', otherModels: 'on', subagentBackend: 'dsh', subagentBackendAvailable: false, subagentRuntimeInstalled: preferenceStatus.value.subagentRuntimeInstalled, ...IMAGE_FEATURE_DEFAULTS, reasoningSummary: 'auto', voiceCall: 'off', voiceVoice: 'cove', voiceLanguage: 'auto', retryPolicy: 'default', imageModel: 'gpt-image-2', imageQuality: 'auto', quickQuotaMode: QUICK_QUOTA_MODE_BAR, searchProvider: 'dsh', fetchProvider: 'dsh', fetchRoutingAvailable: true, speedMode: SPEED_MODE_FAST, outputVerbosity: OUTPUT_VERBOSITY_DEFAULT, inputImageDetail: 'high', streamIdleTimeoutMinutes: 5, contextMode: CONTEXT_MODE_EXTENDED, customContextWindow: 500_000, customContextGpt54: 1_000_000, customContextGpt54Mini: 400_000, customContextGpt55: 272_000, customContextGpt56: 872_000, customContextGpt6Astra: 272_000, contextModels: activeContextModels, availableModels: preferenceStatus.value.availableModels, verbosityModels, fastModels: preferenceStatus.value.fastModels, ultrafastModels: preferenceStatus.value.ultrafastModels, ultraModels: preferenceStatus.value.ultraModels, catalogStatus: preferenceStatus.value.catalogStatus, customContextModels: {}, searchMode: 'live', searchDomains: [], quotaAlerts: 'important', quotaShortThreshold: 20, quotaLongThreshold: 20, writable: true },
+    value: { disabledModels: [], autoQuotaRetry: false, compactionMode: 'dsh', reasoningCache: 'on', defaultReasoningEffort: 'auto', connectionMode: 'sse', connectors: 'off', reviewModel: 'session', remoteControl: 'off', composerPredictions: 'off', otherModels: 'on', subagentBackend: 'dsh', subagentDefaultModel: '', subagentDefaultEffort: 'auto', subagentModels: [], subagentBackendAvailable: false, subagentRuntimeInstalled: preferenceStatus.value.subagentRuntimeInstalled, ...IMAGE_FEATURE_DEFAULTS, reasoningSummary: 'auto', voiceCall: 'off', voiceVoice: 'cove', voiceLanguage: 'auto', retryPolicy: 'default', imageModel: 'gpt-image-2', imageQuality: 'auto', quickQuotaMode: QUICK_QUOTA_MODE_BAR, searchProvider: 'dsh', fetchProvider: 'dsh', fetchRoutingAvailable: true, speedMode: SPEED_MODE_FAST, outputVerbosity: OUTPUT_VERBOSITY_DEFAULT, inputImageDetail: 'high', streamIdleTimeoutMinutes: 5, contextMode: CONTEXT_MODE_EXTENDED, customContextWindow: 500_000, customContextGpt54: 1_000_000, customContextGpt54Mini: 400_000, customContextGpt55: 272_000, customContextGpt56: 872_000, customContextGpt6Astra: 272_000, contextModels: activeContextModels, availableModels: preferenceStatus.value.availableModels, verbosityModels, fastModels: preferenceStatus.value.fastModels, ultrafastModels: preferenceStatus.value.ultrafastModels, ultraModels: preferenceStatus.value.ultraModels, catalogStatus: preferenceStatus.value.catalogStatus, customContextModels: {}, searchMode: 'live', searchDomains: [], quotaAlerts: 'important', quotaShortThreshold: 20, quotaLongThreshold: 20, writable: true },
   })
   assert.equal(host.registered[0].adapter.current().profiles.get('openai-codex').streamIdleTimeoutMs, 5 * 60 * 1000)
   await host.request('preferences/update', { [STREAM_IDLE_TIMEOUT_MINUTES_FIELD]: 10 }, signal)
@@ -618,7 +640,7 @@ test('preferences/models refreshes the catalog before returning the current mode
   const signal = new AbortController().signal
   assert.deepEqual(await handler('preferences/models', {}, signal), {
     ok: true,
-    value: { availableModels: [], contextModels: [{ key: 'gpt-6-astra' }], verbosityModels: ['gpt-6-astra'], fastModels: [], ultrafastModels: [], ultraModels: [], catalogStatus: undefined },
+    value: { availableModels: [], subagentModels: [], contextModels: [{ key: 'gpt-6-astra' }], verbosityModels: ['gpt-6-astra'], fastModels: [], ultrafastModels: [], ultraModels: [], catalogStatus: undefined },
   })
   assert.deepEqual(calls, ['refresh', 'status'])
 

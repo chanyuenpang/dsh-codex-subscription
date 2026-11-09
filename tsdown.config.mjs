@@ -21,8 +21,6 @@ const hostExternal = [
 ]
 const clientExternal = [
   'react', 'react/jsx-runtime', 'react-dom', '@deepseek-ai/cordis',
-  '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-ui-slots',
 ]
 const root = dirname(fileURLToPath(import.meta.url))
 const clientFeatures = [
@@ -113,7 +111,10 @@ function featureRebuildNotice() {
           const current = await stat(entryPath)
           // Serialize features and allow the clock to tick if necessary; never
           // invent a future mtime merely to force a distinct generation.
-          if (Math.floor(current.mtimeMs) === Date.now()) await new Promise(done => setTimeout(done, 1))
+          const deadline = performance.now() + 100
+          while (Date.now() <= current.mtimeMs && performance.now() < deadline) {
+            await new Promise(done => setTimeout(done, 1))
+          }
           await utimes(entryPath, current.atime, new Date())
         } catch (error) {
           // A clean build may finish a feature before the entry is written.
@@ -133,6 +134,12 @@ function clientBundle(entry, fileName, chunk) {
     entry: { client: entry },
     outDir: 'lib', format: 'cjs', platform: 'browser', target: 'es2022',
     dts: false, sourcemap: true, clean: false,
+    // Resolve the installed entries once. Parallel browser builds on Windows
+    // can otherwise leave these pnpm subpaths as unresolved external imports.
+    alias: {
+      '@heroicons/react/24/outline': fileURLToPath(import.meta.resolve('@heroicons/react/24/outline')),
+      'qrcode/lib/core/qrcode.js': fileURLToPath(import.meta.resolve('qrcode/lib/core/qrcode.js')),
+    },
     deps: { neverBundle: clientExternal },
     plugins: [...(chunk ? [featureRebuildNotice()] : [featureImports()]), portableSourcePaths()],
     define: { 'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production') },

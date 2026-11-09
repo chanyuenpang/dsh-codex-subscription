@@ -1,8 +1,17 @@
 export { CHANNEL, unwrap } from './rpc-contract.js'
 import { useSyncExternalStore } from 'react'
 import { quotaForecastView, formatQuotaRunout } from './quota-forecast-view.js'
+import { ACCESS_DENIED, DEVICE_LIMIT, PURCHASE_LIMIT, SIGN_IN_RENEW } from './http-failure.js'
+const ACCESS_FAILURE_KEYS = new Map([[ACCESS_DENIED, 'accessDenied'], [DEVICE_LIMIT, 'deviceLimit'], [PURCHASE_LIMIT, 'purchaseLimit'], [SIGN_IN_RENEW, 'resetRenewLogin']])
+export const accessFailureText = (message, t) => {
+  const key = ACCESS_FAILURE_KEYS.get(message)
+  return key === undefined ? message : t(key)
+}
+export const usageFailureText = (message, t) => ['Request timed out', 'Could not read ChatGPT usage'].includes(message)
+  ? t('usageRefreshFailed') : accessFailureText(message, t)
 export const NS = 'settings.codexSubscription'
-export const SUPPORT_ISSUE_URL = 'https://github.com/WSL043/dsh-codex-subscription/issues/new?template=install-problem.yml'
+export const PROJECT_URL = 'https://github.com/WSL043/dsh-codex-subscription'
+export const SUPPORT_ISSUE_URL = `${PROJECT_URL}/issues/new?template=install-problem.yml`
 export const QUICK_QUOTA_REFRESH_EVENT = 'dsh-codex-subscription:refresh-quick-quota'
 
 export const accountStatusErrorText = (error, t) => {
@@ -36,10 +45,10 @@ export const windowLabel = (seconds, t) => {
   if (isApproximateWindow(seconds, 2_592_000)) return t('windowMonthly')
   if (isApproximateWindow(seconds, 31_536_000)) return t('windowAnnual')
   return seconds >= 86_400 && seconds % 86_400 === 0
-    ? fill(t('windowDays'), { value: seconds / 86_400 })
+    ? fill(t('windowDays'), { value: (seconds / 86_400).toLocaleString(uiLocale()) })
     : seconds >= 172_800
-      ? fill(t('windowDays'), { value: Math.round(seconds / 8640) / 10 })
-      : fill(t('windowHours'), { value: hours(seconds) })
+      ? fill(t('windowDays'), { value: (Math.round(seconds / 8640) / 10).toLocaleString(uiLocale()) })
+      : fill(t('windowHours'), { value: hours(seconds).toLocaleString(uiLocale()) })
 }
 export const validDate = value => {
   const date = new Date(value)

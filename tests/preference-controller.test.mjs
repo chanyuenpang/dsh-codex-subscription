@@ -56,6 +56,18 @@ test('missing Codex runtime leaves ordinary preferences and the DSH backend usab
   assert.equal(controller.getSnapshot().subagentRuntimeInstalled, true)
   controller.dispose()
 })
+test('enabling Codex replaces an initially empty child catalog after main models refreshed', async () => {
+  let children = []
+  const h = harness({ extra: () => ({ subagentModels: children, subagentRuntimeInstalled: true }),
+    models: () => ({ ok: true, value: { subagentModels: [] } }) })
+  await h.ready()
+  await h.controller.refreshModels()
+  children = [{ id: 'gpt-6.1-sol', name: 'GPT-6.1-Sol', efforts: ['high'] }]
+  const pending = h.controller.set({ subagentBackend: 'codex' })
+  h.settle(); await pending
+  assert.deepEqual(h.controller.getSnapshot().subagentModels, children)
+  h.controller.dispose()
+})
 const astraModels = [...fallbackModels, { key: 'gpt-6-astra', label: 'GPT-6 Astra', maximum: 872_000 }]
 const fallbackValue = {
   contextMode: CONTEXT_MODE_STANDARD,
@@ -188,6 +200,20 @@ test('model refresh reports failure and a later retry can recover the directory'
   assert.equal(await retried, true)
   assert.equal(controller.getSnapshot().modelError, false)
   assert.deepEqual(controller.getSnapshot().contextModels, astraModels)
+})
+
+test('catalog timeout keeps the available models and clears its specific error after retry', async () => {
+  const { controller, pendingModels } = deferredModelHarness()
+  await controller.load()
+  const failed = controller.refreshModels()
+  pendingModels[0].resolve({ ok: false, error: { message: 'Codex model catalog refresh timed out' } })
+  assert.equal(await failed, false)
+  assert.equal(controller.getSnapshot().modelError, 'timeout')
+  assert.deepEqual(controller.getSnapshot().contextModels, fallbackModels)
+  const retry = controller.refreshModels()
+  pendingModels[1].resolve({ ok: true, value: { contextModels: astraModels } })
+  assert.equal(await retry, true)
+  assert.equal(controller.getSnapshot().modelError, false)
 })
 
 test('a no-op model refresh keeps the model arrays and reports loading transitions', async () => {

@@ -42,6 +42,28 @@ const remote = (overrides = {}) => ({
 const RETIREMENT_SECONDS = 1792004400
 const CATALOG_NOW = Date.UTC(2026, 8, 29)
 
+test('subtasks use the subscription catalog and still exclude hidden or unsupported routes', async () => {
+  let request
+  const catalog = createOfficialModelCatalog({
+    subagent: true,
+    baseModels: () => base,
+    async getAuth() { return { auth: { apiKey: 'fixture' } } },
+    async readCredential() { return { type: 'oauth', access: 'fixture', accountId: 'test-account' } },
+    async fetch(url, init) {
+      request = { url, originator: init.headers.originator }
+      return Response.json({ models: [
+        ...['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6.1-sol', 'gpt-6.1-terra'].map(slug => remote({ slug })),
+        remote({ slug: 'gpt-reserve', visibility: 'hide' }),
+        remote({ slug: 'gpt-unavailable', supported_in_api: false }),
+      ] })
+    },
+  })
+  await catalog.refresh()
+    assert.equal(request.url, CODEX_MODELS_URL)
+    assert.equal(request.originator, 'pi')
+    assert.deepEqual(catalog.getModels().map(model => model.id), ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6.1-sol', 'gpt-6.1-terra'])
+})
+
 test('plain upgrade targets survive without retirement dates, but URL and Markdown destinations never do', () => {
   for (const upgrade of ['gpt-replacement', { model: 'gpt-replacement' }]) {
     const [model] = parseOfficialModelCatalog({ models: [remote({ upgrade })] }, CATALOG_NOW)

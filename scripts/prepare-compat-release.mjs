@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, writeFile, readdir } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -206,11 +206,10 @@ export function rewriteSubagentRuntime(source, update) {
     .replace(list, (_match, prefix, _items, suffix) => prefix + next + suffix)
 }
 
-export function boundedArtifactPaths(update) {
+export function boundedArtifactPaths(update, readmes = ['README.md', 'README.en.md']) {
   if (!update.updateStableReferences) return []
   return [
-    'README.md',
-    'README.en.md',
+    ...readmes,
     'dsh-codex.ps1',
     '.github/scripts/accept-official-release.ps1',
   ]
@@ -273,19 +272,22 @@ export function planCompatibilityRecheck(state, candidate) {
 }
 
 async function prepare(root, candidate, recheck = false) {
+  // Discover from the published checkout: older tags only contain two READMEs.
+  const readmes = (await readdir(root)).filter(name => /^README(?:\.(?:en|zh-CN|ja|es|fr|de|ru|pt))?\.md$/u.test(name)).sort()
   const compatibilityPath = resolve(root, 'compatibility.json')
   const manifestPath = resolve(root, 'package.json')
   const [compatibility, manifest] = await Promise.all([
     readFile(compatibilityPath, 'utf8').then(JSON.parse),
     readFile(manifestPath, 'utf8').then(JSON.parse),
   ])
-  const update = planCompatibilityUpdate({ compatibility, manifest, host: await hostOf(candidate), documentedVersion: (await readFile(resolve(root, 'README.md'), 'utf8')).match(/dsh-codex-subscription@(\d+\.\d+\.\d+)/u)?.[1] }, candidate)
+  const known = [...compatibility.supported, ...(compatibility.previews ?? [])].includes(candidate)
+  const update = recheck && known ? null : planCompatibilityUpdate({ compatibility, manifest, host: await hostOf(candidate), documentedVersion: (await readFile(resolve(root, 'README.md'), 'utf8')).match(/dsh-codex-subscription@(\d+\.\d+\.\d+)/u)?.[1] }, candidate)
   if (update === null) {
     if (!recheck) return { changed: false, dshVersion: candidate, pluginVersion: manifest.version }
     const planned = planCompatibilityRecheck({ manifest, compatibility }, candidate)
     manifest.version = planned.pluginVersion
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
-    for (const file of ['README.md', 'README.en.md', 'dsh-codex.ps1']) {
+    for (const file of [...readmes, 'dsh-codex.ps1']) {
       const path = resolve(root, file)
       await writeFile(path, rewriteBoundedVersions(await readFile(path, 'utf8'), planned, file))
     }
@@ -296,7 +298,7 @@ async function prepare(root, candidate, recheck = false) {
   const runtimeSource = await readFile(runtimePath, 'utf8')
   const nextRuntime = rewriteSubagentRuntime(runtimeSource, update)
 
-  const boundedPaths = boundedArtifactPaths(update)
+  const boundedPaths = boundedArtifactPaths(update, readmes)
   const sources = await Promise.all(boundedPaths.map(path => readFile(resolve(root, path), 'utf8')))
   const rewritten = sources.map((source, index) => rewriteBoundedVersions(source, update, boundedPaths[index]))
 
@@ -332,7 +334,8 @@ async function refreshReleaseAge(root) {
 const UNSYNCED_DEV_PACKAGES = new Set(['@deepseek-ai/dsh-invariants'])
 
 async function main() {
-  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+  const rootIndex = process.argv.indexOf('--root')
+  const root = rootIndex < 0 ? resolve(dirname(fileURLToPath(import.meta.url)), '..') : resolve(process.argv[rootIndex + 1])
   if (process.argv.includes('--refresh-release-age')) return refreshReleaseAge(root)
   const versionIndex = process.argv.indexOf('--dsh-version')
   const candidate = versionIndex === -1 ? undefined : process.argv[versionIndex + 1]

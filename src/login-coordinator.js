@@ -1,5 +1,6 @@
 import { diagnosticLog } from './diagnostic-log.js'
 import { assertCodexAuthUrl } from './external-url.js'
+import { restrictionMessage } from './http-failure.js'
 
 const LOGIN_METHODS = new Set(['browser', 'device_code'])
 const TERMINAL_PHASES = new Set(['authenticated', 'failed', 'cancelled'])
@@ -51,10 +52,11 @@ const publicPrompt = prompt => ({
   ...(typeof prompt.placeholder === 'string' ? { placeholder: prompt.placeholder } : {}),
 })
 
-const PUBLIC_FAILURES = new Set(['account-claim', 'network', 'token-exchange', 'callback'])
+const PUBLIC_FAILURES = new Set(['account-claim', 'network', 'token-exchange', 'callback', 'account-mismatch'])
 const publicFailure = kind => PUBLIC_FAILURES.has(kind) ? kind : undefined
 
 function classifyLoginFailure(error) {
+  if (error?.code === 'account-mismatch') return 'account-mismatch'
   const message = error instanceof Error ? error.message : ''
   if (/token exchange failed/iu.test(message)) return 'token-exchange'
   if (/fetch failed|\b(?:ECONN|ENOTFOUND|ETIMEDOUT|CERT_|socket|network)\b/iu.test(message)) return 'network'
@@ -88,10 +90,13 @@ export class CodexLoginCoordinator {
     }
   }
 
-  async start({ method, label }) {
+  async start({ method, label, renewId }) {
     if (!LOGIN_METHODS.has(method)) throw new Error(`unsupported Codex login method: ${String(method)}`)
     if (label !== undefined && (typeof label !== 'string' || label.trim().length === 0 || label.trim().length > 48)) {
       throw new Error('unsupported Codex account label')
+    }
+    if (renewId !== undefined && (label !== undefined || typeof renewId !== 'string' || !/^[\w-]{1,128}$/u.test(renewId))) {
+      throw new Error('unsupported Codex renewal target')
     }
     const active = this.#activeId === undefined ? undefined : this.#sessions.get(this.#activeId)
     if (active !== undefined && !TERMINAL_PHASES.has(active.view.phase)) {
@@ -180,7 +185,7 @@ export class CodexLoginCoordinator {
     }
 
     session.run = Promise.resolve()
-      .then(() => this.auth.login(interaction, label === undefined ? {} : { label: label.trim() }))
+      .then(() => this.auth.login(interaction, renewId !== undefined ? { renewId } : label === undefined ? {} : { label: label.trim() }))
       .then(async () => {
         if (controller.signal.aborted) return
         const status = await this.auth.status()
@@ -205,7 +210,8 @@ export class CodexLoginCoordinator {
           return
         }
         try {
-          if (label !== undefined) throw error
+          if (restrictionMessage(error?.message) !== undefined) throw error
+          if (label !== undefined || renewId !== undefined) throw error
           const status = await this.auth.status()
           if (status.authenticated === true) {
             session.view = {
@@ -228,7 +234,7 @@ export class CodexLoginCoordinator {
           method,
           phase: 'failed',
           authenticated: false,
-          error: 'Codex login failed',
+          error: restrictionMessage(error?.message) ?? 'Codex login failed',
           // Only a fixed kind reaches the browser, so the sign-in page can say what to do next.
           failure: publicFailure(classifyLoginFailure(error)),
         }
@@ -315,7 +321,7 @@ export function createCodexRpcHandler(coordinator, options = {}) {
         }
       }
       if (endpoint === 'login/start') {
-        const started = await coordinator.start({ method: input.method, label: input.label })
+        const started = await coordinator.start({ method: input.method, label: input.label, renewId: input.renewId })
         if (input.openExternal !== true) return ok(started)
         const url = started.authUrl ?? started.deviceCode?.verificationUri
         if (typeof url !== 'string' || openExternal === undefined) {

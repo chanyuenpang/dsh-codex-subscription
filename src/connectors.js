@@ -1,7 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { readSubscriptionCredentials } from './subscription-credentials.js'
 import { USER_AGENT } from './version.js'
-import { isBlockedByNetwork, REQUEST_BLOCKED, SIGN_IN_RENEW } from './http-failure.js'
+import { authFailureMessage, ACCESS_DENIED } from './http-failure.js'
 
 // ChatGPT connectors (GitHub, Gmail, Google Drive, Calendar, ...) as the Codex clients reach them: one hosted
 // MCP endpoint that lists and runs the tools of every app the account has connected in ChatGPT.
@@ -76,9 +76,11 @@ export function createConnectorsClient({ getAuth, readCredential, fetch: fetchRp
       body: JSON.stringify({ jsonrpc: '2.0', id: ++nextId, method, params }),
       signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
     })
-    if (response.status === 401) throw new Error(SIGN_IN_RENEW)
-    if (response.status === 403) throw new Error(await isBlockedByNetwork(response) ? REQUEST_BLOCKED : 'ChatGPT does not offer connectors to this account')
-    if (!response.ok) throw new Error(`ChatGPT connectors request failed (HTTP ${response.status})`)
+    if (!response.ok) {
+      const failure = await authFailureMessage(response)
+      throw new Error(failure === ACCESS_DENIED ? 'ChatGPT does not offer connectors to this account'
+        : failure ?? `ChatGPT connectors request failed (HTTP ${response.status})`)
+    }
     const message = await readRpc(response)
     if (record(message.error)) throw new Error(`Connector error: ${clip(oneLine(String(message.error.message ?? message.error.code ?? 'failed')), 200)}`)
     return { result: message.result, accountId }
@@ -208,7 +210,7 @@ export function createConnectorTools({ client, getMode, getApproval, allowed }) 
   })
   const call = defineTool({
     name: 'chatgpt_connectors_call',
-    description: `Run one connector tool with the user's connected account. Call chatgpt_connectors_describe first to get the exact arguments. Tools that change data (send, create, edit, delete) ask the user to approve each call, or are unavailable when the setting is read-only. ${NOTE}`,
+    description: `Run one connector tool with the user's connected account. Call chatgpt_connectors_describe first to get the exact arguments. In Write after asking mode, changes require approval through the current DSH session. Read-only mode blocks changes. ${NOTE}`,
     parameters: {
       name: { type: 'string', required: true, description: 'Exact tool name.' },
       arguments: { type: 'object', additionalProperties: true, description: 'Arguments matching the tool schema.' },
@@ -224,9 +226,11 @@ export function createConnectorTools({ client, getMode, getApproval, allowed }) 
       if (!tool.readOnly && mode !== 'write') {
         if (mode !== 'ask') throw new Error(`${tool.name} changes data and connectors are set to read-only; ask the user to allow writes in the plugin settings`)
         const approval = getApproval?.()
-        if (typeof approval?.request !== 'function') throw new Error('Approval is unavailable, so this connector action was not run')
+        if (typeof approval?.request !== 'function') throw new Error('DSH approval is unavailable in this session. The connector did not write.')
         const outcome = await approval.request({ agent: exec.agent, toolName: tool.name, callId: exec.callId, reason: `${tool.connector}: ${clip(oneLine(tool.description), 160)} Arguments: ${clip(JSON.stringify(input), 400)}`, signal: exec.signal })
-        if (outcome !== 'allowed-once') throw new Error('The user did not approve this connector action')
+        if (outcome === 'cancelled') throw new Error('DSH cancelled the approval request. The connector did not write.')
+        if (outcome === 'unavailable') throw new Error('DSH approval is unavailable in this session. The connector did not write.')
+        if (outcome !== 'allowed-once') throw new Error('DSH did not grant approval. If no prompt appeared, check the current session’s permissions in the composer or with /permission. The connector did not write.')
       }
       return resultOf(await client.callTool(tool.name, input, exec.signal))
     },
